@@ -42,7 +42,7 @@ router.post('/sms', async (req, res) => {
   const { data: contacts, error: lookupError } = await supabase
     .from('property_crm_contacts')
     .select('id, first_name, last_name, phones, sms_status')
-    .contains('phones', [from]);
+    .filter('phones', 'cs', JSON.stringify([from]));
 
   if (lookupError) {
     console.error('Contact lookup failed:', lookupError.message);
