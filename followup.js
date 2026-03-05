@@ -1,151 +1,113 @@
-const cron = require('node-cron');
 const supabase = require('./supabase');
-const { sendSMS, renderTemplate, randomDelay } = require('./sms');
-const { scheduleFollowUps, getDueFollowUps, markFollowUpSent } = require('./followup');
 
-const DAILY_LIMIT    = 50;
-const BUSINESS_START = 8;   // 8am
-const BUSINESS_END   = 17;  // 5pm
-
-// ── Is it currently within business hours? ───────────────────
-function isBusinessHours() {
-  const now = new Date();
-  const day  = now.getDay();   // 0 = Sun, 6 = Sat
-  const hour = now.getHours();
-  return day >= 1 && day <= 5 && hour >= BUSINESS_START && hour < BUSINESS_END;
+function addBusinessDays(date, days) {
+  const result = new Date(date);
+  let added = 0;
+  while (added < days) {
+    result.setDate(result.getDate() + 1);
+    const dow = result.getDay();
+    if (dow !== 0 && dow !== 6) added++;
+  }
+  return result;
 }
 
-// ── Fetch new contacts eligible for Touch 1 ──────────────────
-async function getNewContacts(limit) {
-  const { data, error } = await supabase
-    .from('property_crm_contacts')
-    .select('id, firstName, lastName, phones, propertyAddresses, ownerAddress, county, sms_status')
-    .eq('sms_status', 'eligible')
-    .not('phones', 'is', null)
-    .limit(limit);
+function toDateString(date) {
+  return date.toISOString().split('T')[0];
+}
+
+async function scheduleFollowUps(contactId, sentAt = new Date()) {
+  const { data: templates, error } = await supabase
+    .from('sms_templates')
+    .select('id, touch_number')
+    .in('touch_number', [2, 3, 4])
+    .eq('active', true);
 
   if (error) {
-    console.error('Failed to fetch new contacts:', error.message);
+    console.error('Failed to fetch templates for follow-up scheduling:', error.message);
+    return;
+  }
+
+  const byTouch = {};
+  templates.forEach(t => { byTouch[t.touch_number] = t.id; });
+
+  const touch1Date = new Date(sentAt);
+
+  const queue = [
+    {
+      contact_id:    contactId,
+      touch_number:  2,
+      scheduled_for: toDateString(addBusinessDays(touch1Date, 7)),
+      template_id:   byTouch[2] || null,
+      status:        'pending',
+    },
+    {
+      contact_id:    contactId,
+      touch_number:  3,
+      scheduled_for: toDateString(addBusinessDays(new Date(touch1Date.getTime() + 30 * 24 * 60 * 60 * 1000), 0)),
+      template_id:   byTouch[3] || null,
+      status:        'pending',
+    },
+    {
+      contact_id:    contactId,
+      touch_number:  4,
+      scheduled_for: toDateString(addBusinessDays(new Date(touch1Date.getTime() + 180 * 24 * 60 * 60 * 1000), 0)),
+      template_id:   byTouch[4] || null,
+      status:        'pending',
+    },
+  ];
+
+  const { error: insertError } = await supabase
+    .from('sms_followup_queue')
+    .insert(queue);
+
+  if (insertError) {
+    console.error('Failed to schedule follow-ups:', insertError.message);
+  } else {
+    console.log(`Follow-ups scheduled for contact ${contactId}: days 7, 30, 180`);
+  }
+}
+
+async function getDueFollowUps() {
+  const today = toDateString(new Date());
+
+  const { data, error } = await supabase
+    .from('sms_followup_queue')
+    .select(`
+      id,
+      contact_id,
+      touch_number,
+      template_id,
+      property_crm_contacts (
+        id, first_name, last_name, phones,
+        property_addresses, owner_address, county,
+        sms_status, followup_paused, opt_out_at
+      )
+    `)
+    .eq('status', 'pending')
+    .lte('scheduled_for', today)
+    .order('scheduled_for', { ascending: true });
+
+  if (error) {
+    console.error('Failed to fetch follow-up queue:', error.message);
     return [];
   }
 
-  // Only contacts that have at least one phone number
-  return (data || []).filter(c => c.phones?.length > 0);
+  return (data || []).filter(item => {
+    const c = item.property_crm_contacts;
+    if (!c) return false;
+    if (c.followup_paused) return false;
+    if (c.opt_out_at) return false;
+    if (c.sms_status === 'do_not_contact') return false;
+    if (c.sms_status === 'not_interested') return false;
+    return true;
+  });
 }
 
-// ── Fetch active Touch 1 template ────────────────────────────
-async function getTemplate(touchNumber) {
-  const { data, error } = await supabase
-    .from('sms_templates')
-    .select('id, body')
-    .eq('touch_number', touchNumber)
-    .eq('active', true)
-    .limit(1)
-    .single();
-
-  if (error) {
-    console.error(`Failed to fetch touch ${touchNumber} template:`, error.message);
-    return null;
-  }
-
-  return data;
+async function markFollowUpSent(queueId) {
+  await supabase
+    .from('sms_followup_queue')
+    .update({ status: 'sent' })
+    .eq('id', queueId);
 }
 
-// ── Main daily send job ───────────────────────────────────────
-async function runDailyJob() {
-  if (!isBusinessHours()) {
-    console.log('Outside business hours — skipping send');
-    return;
-  }
-
-  console.log('Running daily SMS job...');
-
-  let sentToday = 0;
-
-  // ── Step 1: Send due follow-ups first ───────────────────────
-  const followUps = await getDueFollowUps();
-  console.log(`${followUps.length} follow-ups due today`);
-
-  for (const item of followUps) {
-    if (sentToday >= DAILY_LIMIT) break;
-
-    const contact  = item.property_crm_contacts;
-    const phone    = contact.phones[0];
-    const template = await getTemplate(item.touch_number);
-
-    if (!template) {
-      console.warn(`No active template for touch ${item.touch_number} — skipping`);
-      continue;
-    }
-
-    const body = renderTemplate(template.body, contact);
-
-    await randomDelay();
-
-    const { success } = await sendSMS({
-      contactId:  contact.id,
-      to:         phone,
-      body,
-      templateId: template.id,
-    });
-
-    if (success) {
-      await markFollowUpSent(item.id);
-      sentToday++;
-      console.log(`Follow-up touch ${item.touch_number} sent to contact ${contact.id} (${sentToday}/${DAILY_LIMIT})`);
-    }
-  }
-
-  // ── Step 2: Fill remaining slots with new contacts ──────────
-  const remaining = DAILY_LIMIT - sentToday;
-  if (remaining <= 0) {
-    console.log('Daily limit reached from follow-ups alone');
-    return;
-  }
-
-  const newContacts = await getNewContacts(remaining);
-  const touch1Template = await getTemplate(1);
-
-  if (!touch1Template) {
-    console.error('No active Touch 1 template found — cannot send new outreach');
-    return;
-  }
-
-  console.log(`Sending Touch 1 to ${newContacts.length} new contacts`);
-
-  for (const contact of newContacts) {
-    if (sentToday >= DAILY_LIMIT) break;
-
-    const phone = contact.phones[0];
-    const body  = renderTemplate(touch1Template.body, contact);
-
-    await randomDelay();
-
-    const { success } = await sendSMS({
-      contactId:  contact.id,
-      to:         phone,
-      body,
-      templateId: touch1Template.id,
-    });
-
-    if (success) {
-      // Schedule the 7/30/180-day follow-up cadence
-      await scheduleFollowUps(contact.id, new Date());
-      sentToday++;
-      console.log(`Touch 1 sent to ${contact.firstName} ${contact.lastName} (${sentToday}/${DAILY_LIMIT})`);
-    }
-  }
-
-  console.log(`Daily job complete — ${sentToday} messages sent`);
-}
-
-// ── Cron: run every 10 minutes during business hours ─────────
-// The randomDelay inside runDailyJob naturally spreads sends
-// We track daily count via sms_message_count to avoid re-runs
-cron.schedule('*/10 * * * *', () => {
-  runDailyJob().catch(err => console.error('Scheduler error:', err));
-});
-
-console.log('Scheduler initialized — runs every 10 minutes, sends during business hours only');
-
-module.exports = { runDailyJob };
+module.exports = { scheduleFollowUps, getDueFollowUps, markFollowUpSent };
