@@ -41,7 +41,7 @@ router.post('/sms', async (req, res) => {
   // ── 1. Look up contact by phone number ──────────────────────
   const { data: contacts, error: lookupError } = await supabase
     .from('property_crm_contacts')
-    .select('id, firstName, lastName, phones, sms_status')
+    .select('id, first_name, last_name, phones, sms_status')
     .contains('phones', [from]);
 
   if (lookupError) {
@@ -107,7 +107,7 @@ router.post('/sms', async (req, res) => {
 
   // ── 7. Alert owner if hot lead ───────────────────────────────
   if (category === 'INTERESTED' || category === 'WANTS_CALL') {
-    const name = `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || 'Unknown';
+    const name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Unknown';
     const action = category === 'WANTS_CALL' ? 'wants you to call them' : 'is open to an offer';
 
     await sendAlert(
