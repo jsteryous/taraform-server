@@ -2,8 +2,17 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 
+// ── CORS — allow taraform.org to call the API ─────────────────
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', 'https://taraform.org');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
 app.use(express.json());
-app.use(express.urlencoded({ extended: false })); // required for Twilio webhook POST
+app.use(express.urlencoded({ extended: false }));
 
 // ── Routes ───────────────────────────────────────────────────
 app.use('/webhook', require('./webhook'));
