@@ -45,9 +45,23 @@ async function getTemplate(touchNumber) {
   return data;
 }
 
+async function isAutomationPaused() {
+  const { data } = await supabase
+    .from('sms_settings')
+    .select('value')
+    .eq('key', 'automation_paused')
+    .single();
+  return data?.value === 'true';
+}
+
 async function runDailyJob() {
   if (!isBusinessHours()) {
     console.log('Outside business hours — skipping send');
+    return;
+  }
+
+  if (await isAutomationPaused()) {
+    console.log('Automation paused — skipping send');
     return;
   }
 

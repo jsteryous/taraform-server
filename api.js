@@ -108,6 +108,32 @@ router.delete('/templates/:id', async (req, res) => {
   res.json({ success: true });
 });
 
+
+// ── GET /api/settings/:key ────────────────────────────────────
+router.get('/settings/:key', async (req, res) => {
+  const { data, error } = await supabase
+    .from('sms_settings')
+    .select('value')
+    .eq('key', req.params.key)
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ── PUT /api/settings/:key ────────────────────────────────────
+router.put('/settings/:key', async (req, res) => {
+  const { value } = req.body;
+  const { data, error } = await supabase
+    .from('sms_settings')
+    .upsert({ key: req.params.key, value })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 // ── GET /api/stats ────────────────────────────────────────────
 router.get('/stats', async (req, res) => {
   const [contacts, messages, queue] = await Promise.all([
