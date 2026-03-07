@@ -1,29 +1,46 @@
-const cron = require('node-cron');
+const cron     = require('node-cron');
 const supabase = require('./supabase');
 const { sendSMS, renderTemplate, randomDelay } = require('./sms');
 const { scheduleFollowUps, getDueFollowUps, markFollowUpSent } = require('./followup');
 
-const DAILY_LIMIT_PER_CLIENT = 50;
-const BUSINESS_START         = 8;
-const BUSINESS_END           = 17;
-
-function isBusinessHours() {
-  const now  = new Date();
-  const day  = now.getDay();
-  const hour = now.getHours();
-  return day >= 1 && day <= 5 && hour >= BUSINESS_START && hour < BUSINESS_END;
+// Eastern time — always used regardless of server timezone
+function getNowEastern() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
 }
 
-// ── Fetch all clients ─────────────────────────────────────────
+function isBusinessHoursFor(startHour, endHour) {
+  const now  = getNowEastern();
+  const day  = now.getDay();
+  const hour = now.getHours();
+  return day >= 1 && day <= 5 && hour >= startHour && hour < endHour;
+}
+
+// ── Load all settings for a client in one query ───────────────
+async function getClientSettings(clientId) {
+  const { data, error } = await supabase
+    .from('sms_settings')
+    .select('key, value')
+    .eq('client_id', clientId);
+
+  if (error || !data) return null;
+
+  const map = {};
+  data.forEach(row => { map[row.key] = row.value; });
+
+  return {
+    paused:     map['automation_paused'] === 'true',
+    startHour:  parseInt(map['send_start_hour']  ?? '8'),
+    endHour:    parseInt(map['send_end_hour']    ?? '17'),
+    dailyLimit: parseInt(map['daily_limit']      ?? '50'),
+  };
+}
+
 async function getAllClients() {
   const { data, error } = await supabase
     .from('clients')
     .select('id, name, twilio_number');
 
-  if (error) {
-    console.error('Failed to fetch clients:', error.message);
-    return [];
-  }
+  if (error) { console.error('Failed to fetch clients:', error.message); return []; }
   return data || [];
 }
 
@@ -36,10 +53,7 @@ async function getNewContacts(clientId, limit) {
     .not('phones', 'is', null)
     .limit(limit);
 
-  if (error) {
-    console.error(`Failed to fetch new contacts for client ${clientId}:`, error.message);
-    return [];
-  }
+  if (error) { console.error(`Failed to fetch contacts for client ${clientId}:`, error.message); return []; }
   return (data || []).filter(c => c.phones?.length > 0);
 }
 
@@ -53,141 +67,114 @@ async function getTemplate(clientId, touchNumber) {
     .limit(1)
     .single();
 
-  if (error) {
-    console.error(`Failed to fetch touch ${touchNumber} template for client ${clientId}:`, error.message);
-    return null;
-  }
+  if (error) { console.error(`No active touch ${touchNumber} template for client ${clientId}`); return null; }
   return data;
 }
 
-async function isAutomationPaused(clientId) {
-  const { data } = await supabase
-    .from('sms_settings')
-    .select('value')
-    .eq('key', 'automation_paused')
-    .eq('client_id', clientId)
-    .single();
-  return data?.value === 'true';
-}
+// ── Run job for a single client ───────────────────────────────
+async function runClientJob(client) {
+  const settings = await getClientSettings(client.id);
 
-// ── Run the daily job for a single client ─────────────────────
-async function runClientJob(clientId, clientName, twilioNumber) {
-  if (await isAutomationPaused(clientId)) {
-    console.log(`[${clientName}] Automation paused — skipping`);
+  if (!settings) {
+    console.log(`[${client.name}] Could not load settings — skipping`);
     return;
   }
 
-  console.log(`[${clientName}] Running daily SMS job...`);
+  if (settings.paused) {
+    console.log(`[${client.name}] Paused — skipping`);
+    return;
+  }
+
+  if (!isBusinessHoursFor(settings.startHour, settings.endHour)) {
+    console.log(`[${client.name}] Outside send window (${settings.startHour}:00–${settings.endHour}:00 ET) — skipping`);
+    return;
+  }
+
+  console.log(`[${client.name}] Running job (limit: ${settings.dailyLimit}/day, window: ${settings.startHour}–${settings.endHour} ET)`);
+
+  const fromNumber = client.twilio_number || process.env.TWILIO_PHONE_NUMBER;
   let sentToday = 0;
 
-  // Resolve which "from" number to use for this client
-  const fromNumber = twilioNumber || process.env.TWILIO_PHONE_NUMBER;
-
-  // Follow-ups first
-  const followUps = await getDueFollowUps(clientId);
-  console.log(`[${clientName}] ${followUps.length} follow-ups due today`);
+  // ── Follow-ups first ────────────────────────────────────────
+  const followUps = await getDueFollowUps(client.id);
+  console.log(`[${client.name}] ${followUps.length} follow-ups due`);
 
   for (const item of followUps) {
-    if (sentToday >= DAILY_LIMIT_PER_CLIENT) break;
+    if (sentToday >= settings.dailyLimit) break;
 
     const contact  = item.property_crm_contacts;
-    const phone    = contact.phones[0];
-    const template = await getTemplate(clientId, item.touch_number);
-
-    if (!template) {
-      console.warn(`[${clientName}] No active template for touch ${item.touch_number} — skipping`);
-      continue;
-    }
+    const template = await getTemplate(client.id, item.touch_number);
+    if (!template) { console.warn(`[${client.name}] No active template for touch ${item.touch_number}`); continue; }
 
     const body = renderTemplate(template.body, contact);
     await randomDelay();
 
     const { success } = await sendSMS({
       contactId:  contact.id,
-      to:         phone,
+      to:         contact.phones[0],
       body,
       from:       fromNumber,
       templateId: template.id,
-      clientId,
+      clientId:   client.id,
     });
 
     if (success) {
       await markFollowUpSent(item.id);
       sentToday++;
-      console.log(`[${clientName}] Follow-up touch ${item.touch_number} → contact ${contact.id} (${sentToday}/${DAILY_LIMIT_PER_CLIENT})`);
+      console.log(`[${client.name}] Follow-up touch ${item.touch_number} → ${contact.first_name} ${contact.last_name} (${sentToday}/${settings.dailyLimit})`);
     }
   }
 
-  // Fill remaining slots with new contacts (Touch 1)
-  const remaining = DAILY_LIMIT_PER_CLIENT - sentToday;
-  if (remaining <= 0) {
-    console.log(`[${clientName}] Daily limit reached from follow-ups alone`);
-    return;
-  }
+  // ── New contacts (Touch 1) ───────────────────────────────────
+  const remaining = settings.dailyLimit - sentToday;
+  if (remaining <= 0) { console.log(`[${client.name}] Daily limit reached`); return; }
 
-  const newContacts    = await getNewContacts(clientId, remaining);
-  const touch1Template = await getTemplate(clientId, 1);
+  const newContacts    = await getNewContacts(client.id, remaining);
+  const touch1Template = await getTemplate(client.id, 1);
 
-  if (!touch1Template) {
-    console.error(`[${clientName}] No active Touch 1 template — cannot send new outreach`);
-    return;
-  }
+  if (!touch1Template) { console.error(`[${client.name}] No active Touch 1 template`); return; }
 
-  console.log(`[${clientName}] Sending Touch 1 to ${newContacts.length} new contacts`);
+  console.log(`[${client.name}] Sending Touch 1 to ${newContacts.length} new contacts`);
 
   for (const contact of newContacts) {
-    if (sentToday >= DAILY_LIMIT_PER_CLIENT) break;
+    if (sentToday >= settings.dailyLimit) break;
 
-    const phone = contact.phones[0];
-    const body  = renderTemplate(touch1Template.body, contact);
+    const body = renderTemplate(touch1Template.body, contact);
     await randomDelay();
 
     const { success } = await sendSMS({
       contactId:  contact.id,
-      to:         phone,
+      to:         contact.phones[0],
       body,
       from:       fromNumber,
       templateId: touch1Template.id,
-      clientId,
+      clientId:   client.id,
     });
 
     if (success) {
-      await scheduleFollowUps(contact.id, clientId, new Date());
+      await scheduleFollowUps(contact.id, client.id, new Date());
       sentToday++;
-      console.log(`[${clientName}] Touch 1 → ${contact.first_name} ${contact.last_name} (${sentToday}/${DAILY_LIMIT_PER_CLIENT})`);
+      console.log(`[${client.name}] Touch 1 → ${contact.first_name} ${contact.last_name} (${sentToday}/${settings.dailyLimit})`);
     }
   }
 
-  console.log(`[${clientName}] Job complete — ${sentToday} messages sent`);
+  console.log(`[${client.name}] Done — ${sentToday} sent`);
 }
 
-// ── Main daily job — runs for every client ────────────────────
+// ── Main job ──────────────────────────────────────────────────
 async function runDailyJob() {
-  if (!isBusinessHours()) {
-    console.log('Outside business hours — skipping send');
-    return;
-  }
-
   const clients = await getAllClients();
+  if (!clients.length) { console.log('No clients'); return; }
 
-  if (!clients.length) {
-    console.log('No clients found — nothing to do');
-    return;
-  }
-
-  console.log(`Running daily job for ${clients.length} client(s)...`);
-
+  console.log(`Scheduler tick — checking ${clients.length} client(s)`);
   for (const c of clients) {
-    await runClientJob(c.id, c.name, c.twilio_number);
+    await runClientJob(c);
   }
-
-  console.log('All client jobs complete');
 }
 
 cron.schedule('*/10 * * * *', () => {
   runDailyJob().catch(err => console.error('Scheduler error:', err));
 });
 
-console.log('Scheduler initialized — runs every 10 minutes, sends during business hours only');
-
+console.log('Scheduler initialized — runs every 10 min, per-client windows in Eastern time');
 module.exports = { runDailyJob };

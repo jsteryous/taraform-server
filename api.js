@@ -28,12 +28,13 @@ router.post('/clients', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Seed default automation_paused setting for this client
-  await supabase.from('sms_settings').insert({
-    client_id: data.id,
-    key:       'automation_paused',
-    value:     'false',
-  });
+  // Seed default settings for this client
+  await supabase.from('sms_settings').insert([
+    { client_id: data.id, key: 'automation_paused', value: 'false' },
+    { client_id: data.id, key: 'send_start_hour',   value: '8'     },
+    { client_id: data.id, key: 'send_end_hour',     value: '17'    },
+    { client_id: data.id, key: 'daily_limit',       value: '50'    },
+  ]);
 
   res.json(data);
 });
