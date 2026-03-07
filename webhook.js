@@ -36,24 +36,53 @@ router.post('/sms', async (req, res) => {
   res.send('<Response></Response>');
 
   const from = req.body.From;
+  const to   = req.body.To;   // which Twilio number received it
   const body = req.body.Body?.trim();
 
   if (!from || !body) return;
 
-  console.log(`Inbound SMS from ${from}: "${body}"`);
+  console.log(`Inbound SMS from ${from} to ${to}: "${body}"`);
+
+  const incomingDigits = normalizePhone(from);
+  const toDigits       = to ? normalizePhone(to) : null;
 
   // ── 1. Look up contact by phone number ──────────────────────
-  // Fetch all contacts with phones, then match by normalized digits
-  const incomingDigits = normalizePhone(from);
+  // If we know which Twilio number received the reply, we can
+  // narrow the search to the matching client's contacts first.
+  let allContacts;
 
-  const { data: allContacts, error: lookupError } = await supabase
-    .from('property_crm_contacts')
-    .select('id, first_name, last_name, phones, sms_status')
-    .not('phones', 'is', null);
+  if (toDigits) {
+    // Find which client owns this Twilio number
+    const { data: matchedClient } = await supabase
+      .from('clients')
+      .select('id')
+      .filter('twilio_number', 'ilike', `%${toDigits}`)
+      .single();
 
-  if (lookupError) {
-    console.error('Contact lookup failed:', lookupError.message);
-    return;
+    if (matchedClient) {
+      const { data, error } = await supabase
+        .from('property_crm_contacts')
+        .select('id, first_name, last_name, phones, sms_status, client_id')
+        .eq('client_id', matchedClient.id)
+        .not('phones', 'is', null);
+
+      if (error) console.error('Scoped contact lookup failed:', error.message);
+      else allContacts = data;
+    }
+  }
+
+  // Fall back to searching all contacts if scoped search didn't work
+  if (!allContacts) {
+    const { data, error } = await supabase
+      .from('property_crm_contacts')
+      .select('id, first_name, last_name, phones, sms_status, client_id')
+      .not('phones', 'is', null);
+
+    if (error) {
+      console.error('Contact lookup failed:', error.message);
+      return;
+    }
+    allContacts = data;
   }
 
   const contact = (allContacts || []).find(c =>
@@ -65,7 +94,7 @@ router.post('/sms', async (req, res) => {
     return;
   }
 
-  console.log(`Matched contact: ${contact.first_name} ${contact.last_name} (id: ${contact.id})`);
+  console.log(`Matched contact: ${contact.first_name} ${contact.last_name} (id: ${contact.id}, client: ${contact.client_id})`);
 
   // ── 2. Hard opt-out keyword check (before AI) ────────────────
   let category;
@@ -80,6 +109,7 @@ router.post('/sms', async (req, res) => {
   // ── 3. Log inbound message ───────────────────────────────────
   const { error: logError } = await supabase.from('sms_messages').insert({
     contact_id:      contact.id,
+    client_id:       contact.client_id,
     direction:       'in',
     body,
     status:          'received',
@@ -117,13 +147,36 @@ router.post('/sms', async (req, res) => {
 
   // ── 6. Alert owner if hot lead ───────────────────────────────
   if (category === 'INTERESTED' || category === 'WANTS_CALL') {
-    const name = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Unknown';
+    const name   = `${contact.first_name || ''} ${contact.last_name || ''}`.trim() || 'Unknown';
     const action = category === 'WANTS_CALL' ? 'wants you to call them' : 'is open to an offer';
 
     await sendAlert(
       `Taraform lead: ${name} (${from}) ${action}.\n\nTheir message: "${body}"\n\nReply manually from your Twilio number.`
     );
   }
+});
+
+// ── POST /webhook/status — Twilio delivery status callback ───
+// Add SERVER_URL=https://your-railway-url to your .env
+// Twilio will POST here when a message is delivered/failed
+router.post('/status', async (req, res) => {
+  res.sendStatus(204);
+
+  const { MessageSid, MessageStatus } = req.body;
+  if (!MessageSid || !MessageStatus) return;
+
+  // Only care about terminal statuses
+  const terminalStatuses = ['delivered', 'undelivered', 'failed'];
+  if (!terminalStatuses.includes(MessageStatus)) return;
+
+  console.log(`Delivery status for ${MessageSid}: ${MessageStatus}`);
+
+  const { error } = await supabase
+    .from('sms_messages')
+    .update({ status: MessageStatus })
+    .eq('twilio_sid', MessageSid);
+
+  if (error) console.error('Failed to update delivery status:', error.message);
 });
 
 module.exports = router;

@@ -6,25 +6,31 @@ const client = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-async function sendSMS({ contactId, to, body, templateId }) {
+async function sendSMS({ contactId, to, body, templateId, clientId, from }) {
   let twilioSid = null;
   let status = 'failed';
+
+  // Use per-client number if provided, fall back to env default
+  const fromNumber = from || process.env.TWILIO_PHONE_NUMBER;
 
   try {
     const message = await client.messages.create({
       body,
-      from: process.env.TWILIO_PHONE_NUMBER,
+      from: fromNumber,
       to,
+      // Ask Twilio to POST delivery status back to your webhook
+      statusCallback: `${process.env.SERVER_URL}/webhook/status`,
     });
     twilioSid = message.sid;
     status = 'sent';
-    console.log(`SMS sent to ${to} — SID: ${twilioSid}`);
+    console.log(`SMS sent to ${to} from ${fromNumber} — SID: ${twilioSid}`);
   } catch (err) {
     console.error(`SMS failed to ${to}:`, err.message);
   }
 
   const { error: logError } = await supabase.from('sms_messages').insert({
     contact_id:  contactId,
+    client_id:   clientId || null,
     direction:   'out',
     body,
     twilio_sid:  twilioSid,
