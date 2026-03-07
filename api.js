@@ -28,23 +28,23 @@ router.post('/clients', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Seed default settings for this client
-  await supabase.from('sms_settings').insert([
-    { client_id: data.id, key: 'automation_paused', value: 'false' },
-    { client_id: data.id, key: 'send_start_hour',   value: '8'     },
-    { client_id: data.id, key: 'send_end_hour',     value: '17'    },
-    { client_id: data.id, key: 'daily_limit',       value: '50'    },
-  ]);
+  // Seed default automation_paused setting for this client
+  await supabase.from('sms_settings').insert({
+    client_id: data.id,
+    key:       'automation_paused',
+    value:     'false',
+  });
 
   res.json(data);
 });
 
 // ── PUT /api/clients/:id — update client ──────────────────────
 router.put('/clients/:id', async (req, res) => {
-  const { name, twilio_number } = req.body;
+  const { name, twilio_number, custom_field_definitions } = req.body;
   const updates = {};
-  if (name          !== undefined) updates.name          = name;
-  if (twilio_number !== undefined) updates.twilio_number = twilio_number;
+  if (name                     !== undefined) updates.name                     = name;
+  if (twilio_number            !== undefined) updates.twilio_number            = twilio_number;
+  if (custom_field_definitions !== undefined) updates.custom_field_definitions = custom_field_definitions;
 
   const { data, error } = await supabase
     .from('clients')

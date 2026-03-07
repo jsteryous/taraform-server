@@ -62,12 +62,20 @@ async function sendSMS({ contactId, to, body, templateId, clientId, from }) {
 }
 
 function renderTemplate(body, contact) {
-  return body
+  let result = body
     .replace(/{{firstName}}/g,       contact.first_name              || '')
     .replace(/{{lastName}}/g,        contact.last_name               || '')
     .replace(/{{propertyAddress}}/g, (contact.property_addresses || [])[0] || '')
     .replace(/{{city}}/g,            extractCity(contact)            || '')
     .replace(/{{county}}/g,          contact.county                  || '');
+
+  // Render custom fields
+  const custom = contact.custom_fields || {};
+  for (const [key, value] of Object.entries(custom)) {
+    result = result.replace(new RegExp(`{{${key}}}`, 'g'), value || '');
+  }
+
+  return result;
 }
 
 function extractCity(contact) {
