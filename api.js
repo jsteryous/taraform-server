@@ -40,11 +40,12 @@ router.post('/clients', async (req, res) => {
 
 // ── PUT /api/clients/:id — update client ──────────────────────
 router.put('/clients/:id', async (req, res) => {
-  const { name, twilio_number, custom_field_definitions } = req.body;
+  const { name, twilio_number, config, custom_field_definitions } = req.body;
   const updates = {};
-  if (name                     !== undefined) updates.name                     = name;
-  if (twilio_number            !== undefined) updates.twilio_number            = twilio_number;
-  if (custom_field_definitions !== undefined) updates.custom_field_definitions = custom_field_definitions;
+  if (name                      !== undefined) updates.name                      = name;
+  if (twilio_number             !== undefined) updates.twilio_number             = twilio_number;
+  if (config                    !== undefined) updates.config                    = config;
+  if (custom_field_definitions  !== undefined) updates.custom_field_definitions  = custom_field_definitions;
 
   const { data, error } = await supabase
     .from('clients')
