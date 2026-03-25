@@ -220,109 +220,186 @@ router.put('/settings/:key', async (req, res) => {
   res.json(data);
 });
 
-// ── GET /api/stats?client_id=xxx&period=today|week|month|alltime ──
+// ── GET /api/stats?client_id=xxx ─────────────────────────────
 router.get('/stats', async (req, res) => {
-  const { client_id, period = 'week' } = req.query;
+  const { client_id } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id query param required' });
 
-  const now = new Date();
-  const periodStart = {
-    today:   new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString(),
-    week:    new Date(Date.now() - 7  * 24 * 60 * 60 * 1000).toISOString(),
-    month:   new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-    alltime: new Date(0).toISOString(),
-  }[period] || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [contacts, periodMessages, allMessages, queue, templates] = await Promise.all([
+  const [contacts, messages, queue, allMessages, leads, closed] = await Promise.all([
     supabase.from('property_crm_contacts')
-      .select('sms_status, status')
+      .select('sms_status')
       .eq('client_id', client_id),
 
     supabase.from('sms_messages')
-      .select('direction, status, intent_category, template_id, sent_at, created_at')
+      .select('direction, status, created_at')
       .eq('client_id', client_id)
-      .gte('created_at', periodStart),
-
-    supabase.from('sms_messages')
-      .select('direction, status, template_id, intent_category')
-      .eq('client_id', client_id),
+      .gte('created_at', weekAgo),
 
     supabase.from('sms_followup_queue')
       .select('status')
       .eq('client_id', client_id)
       .eq('status', 'pending'),
 
-    supabase.from('sms_templates')
-      .select('id, name, touch_number')
-      .eq('client_id', client_id),
+    // All-time sent + delivered for delivery rate
+    supabase.from('sms_messages')
+      .select('direction, status')
+      .eq('client_id', client_id)
+      .eq('direction', 'out'),
+
+    // Positive leads = contacts with interested status
+    supabase.from('property_crm_contacts')
+      .select('id')
+      .eq('client_id', client_id)
+      .eq('sms_status', 'interested'),
+
+    // Deals closed
+    supabase.from('property_crm_contacts')
+      .select('id')
+      .eq('client_id', client_id)
+      .eq('sms_status', 'closed'),
   ]);
 
-  // Contact status breakdown
-  const smsStatusCounts = {};
-  const contactStatusCounts = {};
+  const statusCounts = {};
   (contacts.data || []).forEach(c => {
-    smsStatusCounts[c.sms_status || 'eligible'] = (smsStatusCounts[c.sms_status || 'eligible'] || 0) + 1;
-    contactStatusCounts[c.status || 'New Lead']  = (contactStatusCounts[c.status || 'New Lead']  || 0) + 1;
+    statusCounts[c.sms_status] = (statusCounts[c.sms_status] || 0) + 1;
   });
 
-  // Period metrics
-  const pMsgs    = periodMessages.data || [];
-  const pOut     = pMsgs.filter(m => m.direction === 'out');
-  const pIn      = pMsgs.filter(m => m.direction === 'in');
-  const pReplyRate = pOut.length > 0 ? Math.round((pIn.length / pOut.length) * 100) : null;
+  const outboundAll   = (allMessages.data || []);
+  const delivered     = outboundAll.filter(m => m.status === 'delivered').length;
+  const totalSent     = outboundAll.length;
+  const deliveryRate  = totalSent > 0 ? Math.round((delivered / totalSent) * 100) : null;
 
-  // Intent breakdown for period replies
-  const intentCounts = {};
-  pIn.forEach(m => {
-    const k = m.intent_category || 'unknown';
-    intentCounts[k] = (intentCounts[k] || 0) + 1;
-  });
-
-  // All-time delivery rate
-  const allOut      = (allMessages.data || []).filter(m => m.direction === 'out');
-  const delivered   = allOut.filter(m => m.status === 'delivered').length;
-  const totalSent   = allOut.length;
-  const deliveryRate = totalSent > 0 ? Math.round((delivered / totalSent) * 100) : null;
-
-  // Template performance (all-time)
-  const allMsgs = allMessages.data || [];
-  const templatePerf = (templates.data || []).map(t => {
-    const sent     = allMsgs.filter(m => m.template_id === t.id && m.direction === 'out').length;
-    const replies  = allMsgs.filter(m => m.template_id === t.id && m.direction === 'in').length;
-    const interested = allMsgs.filter(m => m.template_id === t.id && m.direction === 'in' && m.intent_category === 'interested').length;
-    const optOuts  = allMsgs.filter(m => m.template_id === t.id && m.direction === 'in' && m.intent_category === 'opt_out').length;
-    return {
-      id:           t.id,
-      name:         t.name,
-      touchNumber:  t.touch_number,
-      sent,
-      replies,
-      replyRate:    sent > 0 ? Math.round((replies / sent) * 100) : null,
-      interested,
-      optOuts,
-      optOutRate:   sent > 0 ? Math.round((optOuts / sent) * 100) : null,
-    };
-  }).sort((a, b) => (a.touchNumber || 99) - (b.touchNumber || 99));
+  const weekOut      = (messages.data || []).filter(m => m.direction === 'out');
+  const weekIn       = (messages.data || []).filter(m => m.direction === 'in');
+  // Unique contacts that replied this week (rough reply rate proxy)
+  const replyRate    = weekOut.length > 0 ? Math.round((weekIn.length / weekOut.length) * 100) : null;
 
   res.json({
-    period,
-    periodStart,
-    // Period stats
-    sentThisPeriod:    pOut.length,
-    repliesThisPeriod: pIn.length,
-    replyRate:         pReplyRate,
-    intentBreakdown:   intentCounts,
-    // All-time
+    contacts:        statusCounts,
+    sentThisWeek:    weekOut.length,
+    repliesThisWeek: weekIn.length,
+    pendingFollowUps:(queue.data || []).length,
+    // ── New per-client marketing metrics ──
     totalSent,
-    deliveryRate,
-    // Contact breakdown
-    smsStatusCounts,
-    contactStatusCounts,
-    pendingFollowUps: (queue.data || []).length,
-    totalContacts:    (contacts.data || []).length,
-    // Template performance
-    templatePerformance: templatePerf,
+    deliveryRate,   // percent, or null if no data yet
+    replyRate,      // percent this week, or null
+    positiveLeads:  (leads.data || []).length,
+    dealsClosed:    (closed.data || []).length,
   });
 });
 
 module.exports = router;
+
+// ── Email routes ──────────────────────────────────────────────
+const { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord } = require('./email');
+
+// GET /api/email/auth-url?client_id=xxx  — get OAuth URL
+router.get('/email/auth-url', (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  res.json({ url: getAuthUrl(client_id) });
+});
+
+// GET /api/email/status?client_id=xxx  — check if connected
+router.get('/email/status', async (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  const record = await getTokenRecord(client_id);
+  res.json({ connected: !!record, email: record?.email || null });
+});
+
+// DELETE /api/email/disconnect?client_id=xxx
+router.delete('/email/disconnect', async (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  await supabase.from('email_tokens').delete().eq('client_id', client_id);
+  res.json({ success: true });
+});
+
+// GET /api/email/templates?client_id=xxx
+router.get('/email/templates', async (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  const { data, error } = await supabase
+    .from('email_templates')
+    .select('*')
+    .eq('client_id', client_id)
+    .order('touch_number', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
+});
+
+// POST /api/email/templates
+router.post('/email/templates', async (req, res) => {
+  const { client_id, name, subject, body, touch_number } = req.body;
+  if (!client_id || !name || !subject || !body) return res.status(400).json({ error: 'client_id, name, subject, body required' });
+  const { data, error } = await supabase.from('email_templates').insert({
+    client_id, name, subject, body,
+    touch_number: touch_number || null,
+    created_at: new Date().toISOString(),
+  }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// PUT /api/email/templates/:id
+router.put('/email/templates/:id', async (req, res) => {
+  const { name, subject, body, touch_number } = req.body;
+  const { data, error } = await supabase.from('email_templates')
+    .update({ name, subject, body, touch_number: touch_number || null })
+    .eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// DELETE /api/email/templates/:id
+router.delete('/email/templates/:id', async (req, res) => {
+  const { error } = await supabase.from('email_templates').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
+// POST /api/email/send-batch  — manual send to selected contacts
+router.post('/email/send-batch', async (req, res) => {
+  const { client_id, contact_ids, template_id } = req.body;
+  if (!client_id || !contact_ids?.length || !template_id) {
+    return res.status(400).json({ error: 'client_id, contact_ids, template_id required' });
+  }
+
+  // Load template
+  const { data: template, error: tErr } = await supabase
+    .from('email_templates').select('*').eq('id', template_id).single();
+  if (tErr || !template) return res.status(404).json({ error: 'Template not found' });
+
+  // Load contacts
+  const { data: contacts, error: cErr } = await supabase
+    .from('property_crm_contacts')
+    .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids, email_status')
+    .in('id', contact_ids)
+    .eq('client_id', client_id);
+  if (cErr) return res.status(500).json({ error: cErr.message });
+
+  // Filter out contacts with no email or already opted out
+  const eligible = contacts.filter(c => c.email && c.email_status !== 'do_not_email');
+
+  // Respond immediately, send in background
+  res.json({ queued: eligible.length, skipped: contacts.length - eligible.length });
+
+  // Send one at a time with 30-60s delay between
+  for (let i = 0; i < eligible.length; i++) {
+    const contact = eligible[i];
+    const subject = renderEmailTemplate(template.subject, contact);
+    const body    = renderEmailTemplate(template.body, contact);
+    try {
+      await sendEmail({ clientId: client_id, contactId: contact.id, to: contact.email, subject, body, templateId: template_id });
+    } catch (e) {
+      console.error(`Email failed for ${contact.id}:`, e.message);
+    }
+    // Random delay 30-60s between sends (skip after last)
+    if (i < eligible.length - 1) {
+      await new Promise(r => setTimeout(r, 30000 + Math.random() * 30000));
+    }
+  }
+});
