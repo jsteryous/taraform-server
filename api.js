@@ -403,3 +403,46 @@ router.post('/email/send-batch', async (req, res) => {
     }
   }
 });
+
+// GET /api/email/messages?contact_id=xxx&client_id=xxx
+router.get('/email/messages', async (req, res) => {
+  const { contact_id, client_id } = req.query;
+  if (!contact_id || !client_id) return res.status(400).json({ error: 'contact_id and client_id required' });
+  const { data, error } = await supabase
+    .from('email_messages')
+    .select('subject, body, status, sent_at, template_id')
+    .eq('contact_id', contact_id)
+    .eq('client_id', client_id)
+    .order('sent_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
+});
+
+// POST /api/email/send-one  — send a single email from contact detail
+router.post('/email/send-one', async (req, res) => {
+  const { client_id, contact_id, subject, body, template_id } = req.body;
+  if (!client_id || !contact_id || !subject || !body) {
+    return res.status(400).json({ error: 'client_id, contact_id, subject, body required' });
+  }
+
+  const { data: contact, error: cErr } = await supabase
+    .from('property_crm_contacts')
+    .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids')
+    .eq('id', contact_id).single();
+  if (cErr || !contact) return res.status(404).json({ error: 'Contact not found' });
+  if (!contact.email) return res.status(400).json({ error: 'Contact has no email address' });
+
+  const renderedSubject = renderEmailTemplate(subject, contact);
+  const renderedBody    = renderEmailTemplate(body, contact);
+
+  const { success } = await sendEmail({
+    clientId:   client_id,
+    contactId:  contact_id,
+    to:         contact.email,
+    subject:    renderedSubject,
+    body:       renderedBody,
+    templateId: template_id || null,
+  });
+
+  res.json({ success });
+});
