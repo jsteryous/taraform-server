@@ -512,6 +512,41 @@ router.get('/email/verify-status', async (req, res) => {
   res.json(job || { status: 'idle' });
 });
 
+// POST /api/email/verify-reprocess?client_id=xxx — fetch results from Reoon and apply them
+router.post('/email/verify-reprocess', async (req, res) => {
+  const { client_id } = req.body;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+
+  const job = await getJobState(client_id);
+  if (!job?.taskId) return res.status(400).json({ error: 'No task ID found — run verification first' });
+
+  try {
+    console.log(`[Reoon] Reprocessing task ${job.taskId} for ${client_id}`);
+    const result = await getJobResult(job.taskId);
+    console.log(`[Reoon] Task status: ${result.status}, results: ${result.results?.length || 0}`);
+
+    if (!result.results?.length) {
+      return res.status(400).json({ error: `Reoon task status: ${result.status} — no results available yet` });
+    }
+
+    const stats = await updateContactStatuses(result.results, client_id);
+    await saveJobState(client_id, {
+      ...job,
+      status: 'completed',
+      verified: stats.verified,
+      blocked: stats.blocked,
+      skipped: stats.skipped,
+      completedAt: new Date().toISOString(),
+    });
+
+    console.log(`[Reoon] Reprocess complete — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
+    res.json({ success: true, ...stats });
+  } catch (e) {
+    console.error('[Reoon] Reprocess error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // DELETE /api/email/verify-reset?client_id=xxx  — clear stuck job
 router.delete('/email/verify-reset', async (req, res) => {
   const { client_id } = req.query;
