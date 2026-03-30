@@ -80,7 +80,7 @@ async function checkForReplies(clientId, clientName) {
   try {
     const accessToken = await getValidAccessToken(clientId);
     const res = await fetch(
-      'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=50&$select=from,receivedDateTime&$orderby=receivedDateTime desc',
+      `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=200&$select=from,receivedDateTime&$orderby=receivedDateTime desc`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     if (!res.ok) return;
