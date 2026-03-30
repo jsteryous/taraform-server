@@ -531,3 +531,94 @@ async function pollAndUpdate(clientId, taskId) {
 
   await saveJobState(clientId, { taskId, status: 'timeout' });
 }
+
+// ── GET /api/email/stats?client_id=xxx&period=xxx ─────────────
+router.get('/email/stats', async (req, res) => {
+  const { client_id, period = 'week' } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+
+  const now = Date.now();
+  const cutoffs = {
+    today:   new Date(new Date().setHours(0,0,0,0)).toISOString(),
+    week:    new Date(now - 7  * 24 * 60 * 60 * 1000).toISOString(),
+    month:   new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    alltime: new Date(0).toISOString(),
+  };
+  const since = cutoffs[period] || cutoffs.week;
+
+  const [periodMsgs, allMsgs, statusCounts, autoSetting, recentMsgs] = await Promise.all([
+    // Emails sent this period
+    supabase.from('email_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_id', client_id)
+      .eq('direction', 'out')
+      .eq('status', 'sent')
+      .gte('sent_at', since),
+
+    // All-time sent
+    supabase.from('email_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_id', client_id)
+      .eq('direction', 'out')
+      .eq('status', 'sent'),
+
+    // Email status counts on contacts
+    supabase.from('property_crm_contacts')
+      .select('email_status')
+      .eq('client_id', client_id)
+      .not('email', 'is', null)
+      .neq('email', ''),
+
+    // Automation enabled setting
+    supabase.from('sms_settings')
+      .select('value')
+      .eq('client_id', client_id)
+      .eq('key', 'email_automation_enabled')
+      .single(),
+
+    // Recent sends with contact name
+    supabase.from('email_messages')
+      .select('subject, sent_at, contact_id')
+      .eq('client_id', client_id)
+      .eq('direction', 'out')
+      .eq('status', 'sent')
+      .order('sent_at', { ascending: false })
+      .limit(15),
+  ]);
+
+  // Count email statuses
+  const counts = { verified: 0, do_not_email: 0, eligible: 0 };
+  (statusCounts.data || []).forEach(c => {
+    const s = c.email_status || 'eligible';
+    counts[s] = (counts[s] || 0) + 1;
+  });
+
+  // Enrich recent sends with contact names
+  const contactIds = [...new Set((recentMsgs.data || []).map(m => m.contact_id).filter(Boolean))];
+  let contactNames = {};
+  if (contactIds.length > 0) {
+    const { data: names } = await supabase
+      .from('property_crm_contacts')
+      .select('id, first_name, last_name')
+      .in('id', contactIds);
+    (names || []).forEach(c => {
+      contactNames[c.id] = `${c.first_name || ''} ${c.last_name || ''}`.trim();
+    });
+  }
+
+  const recent = (recentMsgs.data || []).map(m => ({
+    ...m,
+    contactName: contactNames[m.contact_id] || null,
+  }));
+
+  res.json({
+    period,
+    sentThisPeriod:  periodMsgs.count || 0,
+    totalSent:       allMsgs.count    || 0,
+    verifiedCount:   counts.verified,
+    blockedCount:    counts.do_not_email,
+    unverifiedCount: counts.eligible,
+    autoEnabled:     autoSetting.data?.value === 'true',
+    recent,
+  });
+});

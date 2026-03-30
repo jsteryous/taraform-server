@@ -169,4 +169,4 @@ async function handleCallback(code, clientId) {
   return email;
 }
 
-module.exports = { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord };
+module.exports = { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord, getValidAccessToken };
