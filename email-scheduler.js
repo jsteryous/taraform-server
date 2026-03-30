@@ -46,10 +46,10 @@ async function getEligibleEmailContacts(clientId, limit) {
     .from('property_crm_contacts')
     .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids, email_status')
     .eq('client_id', clientId)
-    .eq('email_status', 'eligible')
+    .eq('email_status', 'verified')  // only verified emails
     .not('email', 'is', null)
     .neq('email', '')
-    .limit(limit * 3); // fetch extra to filter nulls
+    .limit(limit * 3);
 
   if (error) { console.error('Email contacts fetch error:', error.message); return []; }
   return (data || []).filter(c => c.email).slice(0, limit);
