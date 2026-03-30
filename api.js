@@ -452,7 +452,7 @@ const { submitBulkJob, getJobResult, updateContactStatuses, saveJobState, getJob
 
 // POST /api/email/verify-start  — submit all client emails to Reoon
 router.post('/email/verify-start', async (req, res) => {
-  const { client_id } = req.body;
+  const { client_id, limit = 100 } = req.body;
   if (!client_id) return res.status(400).json({ error: 'client_id required' });
 
   // Check no job already running
@@ -461,18 +461,20 @@ router.post('/email/verify-start', async (req, res) => {
     return res.json({ alreadyRunning: true, job: existing });
   }
 
-  // Fetch all contacts with emails
+  // Only fetch unverified contacts (eligible status) — skip already verified/blocked
   const { data: contacts, error } = await supabase
     .from('property_crm_contacts')
     .select('id, email')
     .eq('client_id', client_id)
+    .eq('email_status', 'eligible')
     .not('email', 'is', null)
-    .neq('email', '');
+    .neq('email', '')
+    .limit(limit);
 
   if (error) return res.status(500).json({ error: error.message });
 
   const emails = [...new Set((contacts || []).map(c => c.email.toLowerCase().trim()).filter(Boolean))];
-  if (!emails.length) return res.status(400).json({ error: 'No contacts with email addresses found' });
+  if (!emails.length) return res.status(400).json({ error: 'No unverified contacts with email addresses found' });
 
   try {
     const taskId = await submitBulkJob(emails, `Taraform - ${new Date().toLocaleDateString()}`);
