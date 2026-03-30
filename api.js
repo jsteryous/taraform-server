@@ -481,10 +481,9 @@ router.post('/email/verify-start', async (req, res) => {
     const job = { taskId, status: 'running', total: emails.length, startedAt: new Date().toISOString() };
     await saveJobState(client_id, job);
     res.json({ started: true, taskId, total: emails.length });
-
-    // Poll in background
     pollAndUpdate(client_id, taskId).catch(e => console.error('Reoon poll error:', e.message));
   } catch (e) {
+    console.error('Reoon verify-start error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -495,6 +494,14 @@ router.get('/email/verify-status', async (req, res) => {
   if (!client_id) return res.status(400).json({ error: 'client_id required' });
   const job = await getJobState(client_id);
   res.json(job || { status: 'idle' });
+});
+
+// DELETE /api/email/verify-reset?client_id=xxx  — clear stuck job
+router.delete('/email/verify-reset', async (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  await saveJobState(client_id, { status: 'idle' });
+  res.json({ success: true });
 });
 
 // Background poll function
