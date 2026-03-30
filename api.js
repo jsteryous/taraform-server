@@ -529,27 +529,31 @@ async function pollAndUpdate(clientId, taskId) {
     const result = await getJobResult(taskId);
     console.log(`[Reoon] Poll ${i + 1}: status=${result.status}, checked=${result.count_checked}/${result.count_total}`);
 
-    if (result.status === 'completed') {
-      const stats = await updateContactStatuses(result.results || [], clientId);
+    const isComplete = result.status === 'completed';
+    const isFailed   = ['failed', 'insufficient_credits', 'file_not_found', 'file_loading_error'].includes(result.status);
+
+    // Process whatever results we have, even partial
+    if ((isComplete || isFailed) && result.results?.length) {
+      const stats = await updateContactStatuses(result.results, clientId);
+      console.log(`[Reoon] ${result.status} — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
       await saveJobState(clientId, {
-        taskId,
-        status: 'completed',
-        total:    result.count_total,
-        verified: stats.verified,
-        blocked:  stats.blocked,
-        skipped:  stats.skipped,
+        taskId, status: isComplete ? 'completed' : 'partial',
+        total: result.count_total, verified: stats.verified,
+        blocked: stats.blocked, skipped: stats.skipped,
         completedAt: new Date().toISOString(),
       });
-      console.log(`[Reoon] Done — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
+      return;
+    }
+
+    if (isFailed) {
+      await saveJobState(clientId, { taskId, status: 'failed', reason: result.status });
       return;
     }
 
     // Update progress
     await saveJobState(clientId, {
-      taskId,
-      status:   'running',
-      total:    result.count_total,
-      checked:  result.count_checked,
+      taskId, status: 'running',
+      total: result.count_total, checked: result.count_checked,
       startedAt: new Date().toISOString(),
     });
   }
@@ -647,3 +651,5 @@ router.get('/email/stats', async (req, res) => {
     recent,
   });
 });
+
+module.exports = router;
