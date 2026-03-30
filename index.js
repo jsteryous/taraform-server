@@ -25,8 +25,9 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', app: 'Taraform SMS Engine', time: new Date().toISOString() });
 });
 
-// ── Start scheduler ───────────────────────────────────────────
+// ── Start schedulers ──────────────────────────────────────────
 require('./scheduler');
+require('./email-scheduler');
 
 // ── Start server ──────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
