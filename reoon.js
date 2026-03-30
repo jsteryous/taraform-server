@@ -10,13 +10,15 @@ async function submitBulkJob(emails, taskName) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       key:    REOON_API_KEY,
-      name:   taskName,
+      name:   taskName.slice(0, 25), // max 25 chars
       emails: emails,
-      mode:   'power',
     }),
   });
   const data = await res.json();
-  if (!res.ok || !data.task_id) throw new Error(data.message || 'Failed to create Reoon task');
+  // Reoon returns 201 on success
+  if (res.status !== 201 || !data.task_id) {
+    throw new Error(data.reason || data.message || `Reoon error: ${res.status} — ${JSON.stringify(data)}`);
+  }
   return data.task_id;
 }
 
@@ -26,7 +28,7 @@ async function getJobResult(taskId) {
     `${REOON_BASE}/get-result-bulk-verification-task/?key=${REOON_API_KEY}&task_id=${taskId}`
   );
   const data = await res.json();
-  if (!res.ok) throw new Error(data.message || 'Failed to get Reoon result');
+  if (!res.ok) throw new Error(data.reason || data.message || 'Failed to get Reoon result');
   return data;
 }
 

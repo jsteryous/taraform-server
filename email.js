@@ -58,6 +58,12 @@ async function getValidAccessToken(clientId) {
 // ── Template rendering ────────────────────────────────────────
 
 function renderEmailTemplate(template, contact) {
+  // Extract street address from full property address
+  const propAddr = (contact.property_addresses || [])[0] || '';
+  const propStreet = propAddr.split(',')[0].trim();
+  const ownerAddr = (contact.owner_address || '');
+  const ownerStreet = ownerAddr.split(',')[0].trim();
+
   const vars = {
     firstName:       contact.first_name  || '',
     lastName:        contact.last_name   || '',
@@ -65,8 +71,12 @@ function renderEmailTemplate(template, contact) {
     county:          contact.county      || '',
     phone:           (contact.phones || [])[0] || '',
     email:           contact.email       || '',
-    propertyAddress: (contact.property_addresses || [])[0] || '',
+    propertyAddress: propAddr,
+    propertyStreet:  propStreet,
+    ownerAddress:    ownerAddr,
+    ownerStreet:     ownerStreet,
     taxMapId:        (contact.tax_map_ids || [])[0] || '',
+    acreage:         contact.acreage     || '',
   };
   let out = template;
   for (const [k, v] of Object.entries(vars)) {
