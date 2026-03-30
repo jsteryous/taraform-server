@@ -446,3 +446,88 @@ router.post('/email/send-one', async (req, res) => {
 
   res.json({ success });
 });
+
+// ── Email verification routes (Reoon) ─────────────────────────
+const { submitBulkJob, getJobResult, updateContactStatuses, saveJobState, getJobState } = require('./reoon');
+
+// POST /api/email/verify-start  — submit all client emails to Reoon
+router.post('/email/verify-start', async (req, res) => {
+  const { client_id } = req.body;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+
+  // Check no job already running
+  const existing = await getJobState(client_id);
+  if (existing?.status === 'running') {
+    return res.json({ alreadyRunning: true, job: existing });
+  }
+
+  // Fetch all contacts with emails
+  const { data: contacts, error } = await supabase
+    .from('property_crm_contacts')
+    .select('id, email')
+    .eq('client_id', client_id)
+    .not('email', 'is', null)
+    .neq('email', '');
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  const emails = [...new Set((contacts || []).map(c => c.email.toLowerCase().trim()).filter(Boolean))];
+  if (!emails.length) return res.status(400).json({ error: 'No contacts with email addresses found' });
+
+  try {
+    const taskId = await submitBulkJob(emails, `Taraform - ${new Date().toLocaleDateString()}`);
+    const job = { taskId, status: 'running', total: emails.length, startedAt: new Date().toISOString() };
+    await saveJobState(client_id, job);
+    res.json({ started: true, taskId, total: emails.length });
+
+    // Poll in background
+    pollAndUpdate(client_id, taskId).catch(e => console.error('Reoon poll error:', e.message));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/email/verify-status?client_id=xxx  — check job progress
+router.get('/email/verify-status', async (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  const job = await getJobState(client_id);
+  res.json(job || { status: 'idle' });
+});
+
+// Background poll function
+async function pollAndUpdate(clientId, taskId) {
+  const MAX_POLLS = 60; // 30 min max
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await new Promise(r => setTimeout(r, 30000)); // wait 30s
+
+    const result = await getJobResult(taskId);
+    console.log(`[Reoon] Poll ${i + 1}: status=${result.status}, checked=${result.count_checked}/${result.count_total}`);
+
+    if (result.status === 'completed') {
+      const stats = await updateContactStatuses(result.results || [], clientId);
+      await saveJobState(clientId, {
+        taskId,
+        status: 'completed',
+        total:    result.count_total,
+        verified: stats.verified,
+        blocked:  stats.blocked,
+        skipped:  stats.skipped,
+        completedAt: new Date().toISOString(),
+      });
+      console.log(`[Reoon] Done — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
+      return;
+    }
+
+    // Update progress
+    await saveJobState(clientId, {
+      taskId,
+      status:   'running',
+      total:    result.count_total,
+      checked:  result.count_checked,
+      startedAt: new Date().toISOString(),
+    });
+  }
+
+  await saveJobState(clientId, { taskId, status: 'timeout' });
+}
