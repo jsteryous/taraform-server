@@ -222,75 +222,85 @@ router.put('/settings/:key', async (req, res) => {
 
 // ── GET /api/stats?client_id=xxx ─────────────────────────────
 router.get('/stats', async (req, res) => {
-  const { client_id } = req.query;
+  const { client_id, period = 'week' } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id query param required' });
 
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const now = new Date();
+  const periodStart = {
+    today:   new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString(),
+    week:    new Date(Date.now() - 7  * 24 * 60 * 60 * 1000).toISOString(),
+    month:   new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    alltime: new Date(0).toISOString(),
+  }[period] || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [contacts, messages, queue, allMessages, leads, closed] = await Promise.all([
-    supabase.from('property_crm_contacts')
-      .select('sms_status')
-      .eq('client_id', client_id),
-
-    supabase.from('sms_messages')
-      .select('direction, status, created_at')
-      .eq('client_id', client_id)
-      .gte('created_at', weekAgo),
-
-    supabase.from('sms_followup_queue')
-      .select('status')
-      .eq('client_id', client_id)
-      .eq('status', 'pending'),
-
-    // All-time sent + delivered for delivery rate
-    supabase.from('sms_messages')
-      .select('direction, status')
-      .eq('client_id', client_id)
-      .eq('direction', 'out'),
-
-    // Positive leads = contacts with interested status
-    supabase.from('property_crm_contacts')
-      .select('id')
-      .eq('client_id', client_id)
-      .eq('sms_status', 'interested'),
-
-    // Deals closed
-    supabase.from('property_crm_contacts')
-      .select('id')
-      .eq('client_id', client_id)
-      .eq('sms_status', 'closed'),
+  const [contacts, periodMessages, allMessages, queue, templates, contactsWithOffers] = await Promise.all([
+    supabase.from('property_crm_contacts').select('sms_status, status').eq('client_id', client_id),
+    supabase.from('sms_messages').select('direction, status, intent_category, template_id, created_at').eq('client_id', client_id).gte('created_at', periodStart),
+    supabase.from('sms_messages').select('direction, status, template_id, intent_category').eq('client_id', client_id),
+    supabase.from('sms_followup_queue').select('status').eq('client_id', client_id).eq('status', 'pending'),
+    supabase.from('sms_templates').select('id, name, touch_number').eq('client_id', client_id),
+    supabase.from('property_crm_contacts').select('id, first_name, last_name, county, tax_map_ids, offers').eq('client_id', client_id).not('offers', 'is', null).neq('offers', '[]'),
   ]);
 
-  const statusCounts = {};
+  const smsStatusCounts = {}, contactStatusCounts = {};
   (contacts.data || []).forEach(c => {
-    statusCounts[c.sms_status] = (statusCounts[c.sms_status] || 0) + 1;
+    smsStatusCounts[c.sms_status || 'eligible'] = (smsStatusCounts[c.sms_status || 'eligible'] || 0) + 1;
+    contactStatusCounts[c.status || 'New Lead']  = (contactStatusCounts[c.status || 'New Lead']  || 0) + 1;
   });
 
-  const outboundAll   = (allMessages.data || []);
-  const delivered     = outboundAll.filter(m => m.status === 'delivered').length;
-  const totalSent     = outboundAll.length;
-  const deliveryRate  = totalSent > 0 ? Math.round((delivered / totalSent) * 100) : null;
+  const pMsgs = periodMessages.data || [];
+  const pOut  = pMsgs.filter(m => m.direction === 'out');
+  const pIn   = pMsgs.filter(m => m.direction === 'in');
+  const intentCounts = {};
+  pIn.forEach(m => { const k = m.intent_category || 'unknown'; intentCounts[k] = (intentCounts[k] || 0) + 1; });
 
-  const weekOut      = (messages.data || []).filter(m => m.direction === 'out');
-  const weekIn       = (messages.data || []).filter(m => m.direction === 'in');
-  // Unique contacts that replied this week (rough reply rate proxy)
-  const replyRate    = weekOut.length > 0 ? Math.round((weekIn.length / weekOut.length) * 100) : null;
+  const allOut = (allMessages.data || []).filter(m => m.direction === 'out');
+  const delivered = allOut.filter(m => m.status === 'delivered').length;
+  const totalSent = allOut.length;
+  const deliveryRate = totalSent > 0 ? Math.round((delivered / totalSent) * 100) : null;
+
+  const allMsgs = allMessages.data || [];
+  const templatePerf = (templates.data || []).map(t => {
+    const sent = allMsgs.filter(m => m.template_id === t.id && m.direction === 'out').length;
+    const replies = allMsgs.filter(m => m.template_id === t.id && m.direction === 'in').length;
+    const interested = allMsgs.filter(m => m.template_id === t.id && m.direction === 'in' && m.intent_category === 'interested').length;
+    const optOuts = allMsgs.filter(m => m.template_id === t.id && m.direction === 'in' && m.intent_category === 'opt_out').length;
+    return { id: t.id, name: t.name, touchNumber: t.touch_number, sent, replies, replyRate: sent > 0 ? Math.round((replies/sent)*100) : null, interested, optOuts, optOutRate: sent > 0 ? Math.round((optOuts/sent)*100) : null };
+  }).sort((a, b) => (a.touchNumber || 99) - (b.touchNumber || 99));
+
+  // Offer stats — all contacts with offers
+  const allOffers = (contactsWithOffers.data || []).flatMap(c =>
+    (c.offers || []).map(o => ({ ...o, contactId: c.id, contactName: `${c.first_name||''} ${c.last_name||''}`.trim(), county: c.county||'', taxMapIds: c.tax_map_ids||[] }))
+  );
+  const periodOffers = period === 'alltime' ? allOffers : allOffers.filter(o => o.createdAt && o.createdAt >= periodStart);
+  const offerByStatus = {};
+  periodOffers.forEach(o => { const s = o.status || 'Pending'; offerByStatus[s] = (offerByStatus[s]||0)+1; });
 
   res.json({
-    contacts:        statusCounts,
-    sentThisWeek:    weekOut.length,
-    repliesThisWeek: weekIn.length,
-    pendingFollowUps:(queue.data || []).length,
-    // ── New per-client marketing metrics ──
-    totalSent,
-    deliveryRate,   // percent, or null if no data yet
-    replyRate,      // percent this week, or null
-    positiveLeads:  (leads.data || []).length,
-    dealsClosed:    (closed.data || []).length,
+    period, periodStart,
+    sentThisPeriod:    pOut.length,
+    repliesThisPeriod: pIn.length,
+    replyRate:         pOut.length > 0 ? Math.round((pIn.length/pOut.length)*100) : null,
+    intentBreakdown:   intentCounts,
+    totalSent, deliveryRate,
+    smsStatusCounts, contactStatusCounts,
+    pendingFollowUps: (queue.data || []).length,
+    totalContacts:    (contacts.data || []).length,
+    templatePerformance: templatePerf,
+    offerStats: {
+      count:         new Set(periodOffers.map(o => o.contactId)).size,
+      allTimeCount:  new Set(allOffers.map(o => o.contactId)).size,
+      totalCount:    periodOffers.length,
+      totalValue:    periodOffers.reduce((s,o) => s+(Number(o.amount)||0), 0),
+      acceptedValue: periodOffers.filter(o => o.status==='Accepted').reduce((s,o) => s+(Number(o.amount)||0), 0),
+      byStatus:      offerByStatus,
+      recent:        [...periodOffers].sort((a,b) => new Date(b.createdAt||0)-new Date(a.createdAt||0)).slice(0,50),
+      allTime:       allOffers,
+    },
   });
 });
 
-module.exports = router;
+
 
 // ── Email routes ──────────────────────────────────────────────
 const { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord } = require('./email');
