@@ -420,17 +420,23 @@ router.get('/email/messages', async (req, res) => {
 
 // POST /api/email/send-one  — send a single email from contact detail
 router.post('/email/send-one', async (req, res) => {
-  const { client_id, contact_id, subject, body, template_id } = req.body;
+  const { client_id, contact_id, subject, body, template_id, force } = req.body;
   if (!client_id || !contact_id || !subject || !body) {
     return res.status(400).json({ error: 'client_id, contact_id, subject, body required' });
   }
 
   const { data: contact, error: cErr } = await supabase
     .from('property_crm_contacts')
-    .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids')
+    .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids, acreage, email_status')
     .eq('id', contact_id).single();
   if (cErr || !contact) return res.status(404).json({ error: 'Contact not found' });
   if (!contact.email) return res.status(400).json({ error: 'Contact has no email address' });
+  if (contact.email_status === 'do_not_email') return res.status(403).json({ error: 'Contact is marked do not email' });
+
+  // Warn if not verified, but allow manual override with force=true
+  if (contact.email_status === 'eligible' && !force) {
+    return res.status(422).json({ error: 'Email not verified. Send anyway?', unverified: true });
+  }
 
   const renderedSubject = renderEmailTemplate(subject, contact);
   const renderedBody    = renderEmailTemplate(body, contact);
