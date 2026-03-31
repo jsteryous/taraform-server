@@ -28,10 +28,8 @@ async function getJobResult(taskId) {
     `${REOON_BASE}/get-result-bulk-verification-task/?key=${REOON_API_KEY}&task_id=${taskId}&task-id=${taskId}`
   );
   const data = await res.json();
-  console.log('[Reoon] Raw result keys:', Object.keys(data), '| results type:', typeof data.results, '| count:', data.results?.length ?? 'undefined');
-  if (data.results) console.log('[Reoon] results sample:', JSON.stringify(data.results).slice(0, 300));
   if (!res.ok) throw new Error(data.reason || data.message || 'Failed to get Reoon result');
-  // Normalize results — could be array or object
+  // Normalize results — Reoon returns object keyed by email, convert to array
   if (data.results && !Array.isArray(data.results)) {
     data.results = Object.values(data.results);
   }
@@ -39,8 +37,17 @@ async function getJobResult(taskId) {
 }
 
 // ── Map Reoon status → email_status ──────────────────────────
-function mapStatus(reoonStatus) {
-  switch (reoonStatus) {
+function mapStatus(item) {
+  // Bulk API returns an object with boolean fields
+  if (typeof item === 'object' && item !== null && 'is_safe_to_send' in item) {
+    if (item.is_disposable || item.is_spamtrap || item.is_disabled) return 'do_not_email';
+    if (!item.is_deliverable && !item.is_catch_all) return 'do_not_email';
+    if (item.is_safe_to_send || item.is_catch_all) return 'verified';
+    return 'unknown';
+  }
+  // Single API returns a status string
+  const s = typeof item === 'string' ? item : item?.status;
+  switch (s) {
     case 'safe':
     case 'role':        return 'verified';
     case 'inbox_full':  return 'verified';
@@ -49,8 +56,8 @@ function mapStatus(reoonStatus) {
     case 'spamtrap':
     case 'temporary':
     case 'disabled':    return 'do_not_email';
-    case 'unknown':     return 'unknown';  // tried but unverifiable — don't retry
-    default:            return null;       // unexpected status — leave unchanged
+    case 'unknown':     return 'unknown';
+    default:            return null;
   }
 }
 
@@ -59,7 +66,7 @@ async function updateContactStatuses(results, clientId) {
   let verified = 0, blocked = 0, skipped = 0;
 
   for (const item of results) {
-    const emailStatus = mapStatus(item.status);
+    const emailStatus = mapStatus(item);  // pass whole item — handles both bulk and single API formats
     if (!emailStatus) { skipped++; continue; }
 
     const { error } = await supabase
