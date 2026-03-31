@@ -477,7 +477,7 @@ router.post('/email/verify-start', async (req, res) => {
     return res.json({ alreadyRunning: true, job: existing });
   }
 
-  // Only fetch unverified contacts (eligible status) — skip already verified/blocked
+  // Fetch slightly more than limit to account for deduplication
   const { data: contacts, error } = await supabase
     .from('property_crm_contacts')
     .select('id, email')
@@ -485,11 +485,11 @@ router.post('/email/verify-start', async (req, res) => {
     .eq('email_status', 'eligible')  // skip unknown, verified, do_not_email
     .not('email', 'is', null)
     .neq('email', '')
-    .limit(limit);
+    .limit(limit + 10);
 
   if (error) return res.status(500).json({ error: error.message });
 
-  const emails = [...new Set((contacts || []).map(c => c.email.toLowerCase().trim()).filter(Boolean))];
+  const emails = [...new Set((contacts || []).map(c => c.email.toLowerCase().trim()).filter(Boolean))].slice(0, limit);
   if (!emails.length) return res.status(400).json({ error: 'No unverified contacts with email addresses found' });
 
   try {

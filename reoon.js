@@ -29,7 +29,12 @@ async function getJobResult(taskId) {
   );
   const data = await res.json();
   console.log('[Reoon] Raw result keys:', Object.keys(data), '| results type:', typeof data.results, '| count:', data.results?.length ?? 'undefined');
+  if (data.results) console.log('[Reoon] results sample:', JSON.stringify(data.results).slice(0, 300));
   if (!res.ok) throw new Error(data.reason || data.message || 'Failed to get Reoon result');
+  // Normalize results — could be array or object
+  if (data.results && !Array.isArray(data.results)) {
+    data.results = Object.values(data.results);
+  }
   return data;
 }
 
