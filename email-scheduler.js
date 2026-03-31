@@ -3,14 +3,35 @@ const supabase = require('./supabase');
 const { sendEmail, renderEmailTemplate, getTokenRecord, getValidAccessToken } = require('./email');
 
 const EMAIL_BUSINESS_START = 8.5;
+
+// Check if a contact has all fields used in a template
+function hasRequiredFields(templateStr, contact) {
+  const used = templateStr.match(/{{(\w+)}}/g) || [];
+  const fieldMap = {
+    acreage:         contact.acreage,
+    propertyAddress: (contact.property_addresses || [])[0],
+    propertyStreet:  (contact.property_addresses || [])[0],
+    ownerAddress:    contact.owner_address,
+    ownerStreet:     contact.owner_address,
+    taxMapId:        (contact.tax_map_ids || [])[0],
+    county:          contact.county,
+  };
+  for (const tag of used) {
+    const key = tag.replace(/{{|}}/g, '');
+    if (key in fieldMap && !fieldMap[key]) return false;
+  }
+  return true;
+}
 const EMAIL_BUSINESS_END   = 17.5;
 const TOUCH_DELAY_DAYS     = 7;
 const MAX_TOUCHES          = 4;
 
 function isEmailBusinessHours() {
-  const now   = new Date();
-  const day   = now.getDay();
-  const hours = now.getHours() + now.getMinutes() / 60;
+  // Always use Eastern time regardless of server timezone
+  const eastern = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const now     = new Date(eastern);
+  const day     = now.getDay();
+  const hours   = now.getHours() + now.getMinutes() / 60;
   return day >= 1 && day <= 5 && hours >= EMAIL_BUSINESS_START && hours < EMAIL_BUSINESS_END;
 }
 
@@ -70,7 +91,7 @@ async function getDueFollowUps(clientId, limit) {
 
 async function getContact(contactId) {
   const { data } = await supabase.from('property_crm_contacts')
-    .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids, email_status')
+    .select('id, first_name, last_name, email, phones, county, property_addresses, owner_address, tax_map_ids, acreage, email_status')
     .eq('id', contactId).single();
   return data;
 }
@@ -117,7 +138,7 @@ async function checkForReplies(clientId, clientName) {
 // ── Get new verified contacts not yet emailed ─────────────────
 async function getNewEmailContacts(clientId, limit) {
   const { data } = await supabase.from('property_crm_contacts')
-    .select('id, first_name, last_name, email, phones, county, property_addresses, tax_map_ids')
+    .select('id, first_name, last_name, email, phones, county, property_addresses, owner_address, tax_map_ids, acreage')
     .eq('client_id', clientId).eq('email_status', 'verified')
     .not('email', 'is', null).neq('email', '').limit(limit * 4);
   if (!data?.length) return [];
@@ -166,6 +187,13 @@ async function runEmailJob(clientId, clientName) {
       await supabase.from('email_followup_queue').update({ status: 'skipped' }).eq('id', item.id);
       continue;
     }
+    // Skip if contact is missing fields the template needs
+    const combined = template.subject + ' ' + template.body;
+    if (!hasRequiredFields(combined, contact)) {
+      console.log(`[${clientName}] Skipping ${contact.first_name} — missing required fields for Touch ${item.touch_number}`);
+      await supabase.from('email_followup_queue').update({ status: 'skipped' }).eq('id', item.id);
+      continue;
+    }
     try {
       const { success } = await sendEmail({
         clientId, contactId: contact.id, to: contact.email,
@@ -189,8 +217,13 @@ async function runEmailJob(clientId, clientName) {
   if (!touch1) { console.log(`[${clientName}] No Touch 1 template`); return; }
 
   const newContacts = await getNewEmailContacts(clientId, remaining);
+  const touch1Combined = touch1.subject + ' ' + touch1.body;
   for (const contact of newContacts) {
     if (remaining <= 0) break;
+    if (!hasRequiredFields(touch1Combined, contact)) {
+      console.log(`[${clientName}] Skipping ${contact.first_name} ${contact.last_name} — missing required fields`);
+      continue;
+    }
     try {
       const { success } = await sendEmail({
         clientId, contactId: contact.id, to: contact.email,
