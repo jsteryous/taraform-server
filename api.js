@@ -575,15 +575,26 @@ async function pollAndUpdate(clientId, taskId) {
     const isFailed   = ['failed', 'insufficient_credits', 'file_not_found', 'file_loading_error', 'error'].includes(result.status);
 
     // Process whatever results we have, even partial
-    if (result.results?.length && (isComplete || isFailed)) {
-      const stats = await updateContactStatuses(result.results, clientId);
-      console.log(`[Reoon] ${result.status} — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
-      await saveJobState(clientId, {
-        taskId, status: isComplete ? 'completed' : 'partial',
-        total: result.count_total, verified: stats.verified,
-        blocked: stats.blocked, skipped: stats.skipped,
-        completedAt: new Date().toISOString(),
-      });
+    if (isComplete || isFailed) {
+      if (result.results?.length) {
+        const stats = await updateContactStatuses(result.results, clientId);
+        console.log(`[Reoon] ${result.status} — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
+        await saveJobState(clientId, {
+          taskId, status: 'completed',
+          total: result.count_total, verified: stats.verified,
+          blocked: stats.blocked, skipped: stats.skipped,
+          completedAt: new Date().toISOString(),
+        });
+      } else {
+        // Reoon completed but results array is empty — mark done anyway so UI stops spinning
+        console.log(`[Reoon] ${result.status} with no results array — marking complete. count_total=${result.count_total}`);
+        await saveJobState(clientId, {
+          taskId, status: 'completed',
+          total: result.count_total || 0, verified: 0, blocked: 0, skipped: result.count_total || 0,
+          completedAt: new Date().toISOString(),
+          note: 'No results returned by Reoon — credits may have been exhausted',
+        });
+      }
       return;
     }
 

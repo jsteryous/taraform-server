@@ -24,8 +24,9 @@ async function submitBulkJob(emails, taskName) {
 
 // ── Poll job status ───────────────────────────────────────────
 async function getJobResult(taskId) {
+  // Reoon docs show 'task-id' but some versions use 'task_id' — send both
   const res = await fetch(
-    `${REOON_BASE}/get-result-bulk-verification-task/?key=${REOON_API_KEY}&task_id=${taskId}`
+    `${REOON_BASE}/get-result-bulk-verification-task/?key=${REOON_API_KEY}&task_id=${taskId}&task-id=${taskId}`
   );
   const data = await res.json();
   if (!res.ok) throw new Error(data.reason || data.message || 'Failed to get Reoon result');
