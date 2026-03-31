@@ -38,14 +38,14 @@ function mapStatus(reoonStatus) {
   switch (reoonStatus) {
     case 'safe':
     case 'role':        return 'verified';
-    case 'inbox_full':  return 'verified';   // mailbox exists, just full
-    case 'catch_all':   return 'verified';   // risky but keep — let user decide
+    case 'inbox_full':  return 'verified';
+    case 'catch_all':   return 'verified';
     case 'invalid':
     case 'spamtrap':
     case 'temporary':
     case 'disabled':    return 'do_not_email';
-    case 'unknown':
-    default:            return null;         // don't change — unknown gets refund from Reoon
+    case 'unknown':     return 'unknown';  // tried but unverifiable — don't retry
+    default:            return null;       // unexpected status — leave unchanged
   }
 }
 

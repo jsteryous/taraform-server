@@ -482,7 +482,7 @@ router.post('/email/verify-start', async (req, res) => {
     .from('property_crm_contacts')
     .select('id, email')
     .eq('client_id', client_id)
-    .eq('email_status', 'eligible')
+    .eq('email_status', 'eligible')  // skip unknown, verified, do_not_email
     .not('email', 'is', null)
     .neq('email', '')
     .limit(limit);
@@ -670,7 +670,7 @@ router.get('/email/stats', async (req, res) => {
   ]);
 
   // Count email statuses
-  const counts = { verified: 0, do_not_email: 0, eligible: 0 };
+  const counts = { verified: 0, do_not_email: 0, eligible: 0, unknown: 0 };
   (statusCounts.data || []).forEach(c => {
     const s = c.email_status || 'eligible';
     counts[s] = (counts[s] || 0) + 1;
@@ -701,6 +701,7 @@ router.get('/email/stats', async (req, res) => {
     verifiedCount:   counts.verified,
     blockedCount:    counts.do_not_email,
     unverifiedCount: counts.eligible,
+    unknownCount:    counts.unknown,
     autoEnabled:     autoSetting.data?.value === 'true',
     recent,
   });
