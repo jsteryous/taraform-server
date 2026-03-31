@@ -557,18 +557,25 @@ router.delete('/email/verify-reset', async (req, res) => {
 
 // Background poll function
 async function pollAndUpdate(clientId, taskId) {
-  const MAX_POLLS = 60; // 30 min max
+  const MAX_POLLS = 60;
   for (let i = 0; i < MAX_POLLS; i++) {
-    await new Promise(r => setTimeout(r, 30000)); // wait 30s
+    // First poll after 5s, then every 15s
+    await new Promise(r => setTimeout(r, i === 0 ? 5000 : 15000));
 
-    const result = await getJobResult(taskId);
-    console.log(`[Reoon] Poll ${i + 1}: status=${result.status}, checked=${result.count_checked}/${result.count_total}`);
+    let result;
+    try {
+      result = await getJobResult(taskId);
+    } catch (e) {
+      console.error(`[Reoon] Poll ${i + 1} error:`, e.message);
+      continue;
+    }
+    console.log(`[Reoon] Poll ${i + 1}: status=${result.status}, results=${result.results?.length || 0}`);
 
     const isComplete = result.status === 'completed';
-    const isFailed   = ['failed', 'insufficient_credits', 'file_not_found', 'file_loading_error'].includes(result.status);
+    const isFailed   = ['failed', 'insufficient_credits', 'file_not_found', 'file_loading_error', 'error'].includes(result.status);
 
     // Process whatever results we have, even partial
-    if ((isComplete || isFailed) && result.results?.length) {
+    if (result.results?.length && (isComplete || isFailed)) {
       const stats = await updateContactStatuses(result.results, clientId);
       console.log(`[Reoon] ${result.status} — ${stats.verified} verified, ${stats.blocked} blocked, ${stats.skipped} skipped`);
       await saveJobState(clientId, {
@@ -580,7 +587,8 @@ async function pollAndUpdate(clientId, taskId) {
       return;
     }
 
-    if (isFailed) {
+    if (isFailed && !result.results?.length) {
+      console.log(`[Reoon] Job failed with no results: ${result.status}`);
       await saveJobState(clientId, { taskId, status: 'failed', reason: result.status });
       return;
     }
