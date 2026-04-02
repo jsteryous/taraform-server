@@ -7,16 +7,21 @@ email verification (Reoon), and AI intent detection (Claude). Deployed on Railwa
 ## Stack
 - Node.js + Express
 - Supabase JS client (server-side)
+- BullMQ + Redis for email job queue
+- Sentry (@sentry/node) for error monitoring
 - Deployed on Railway (auto-deploys from main branch of taraform-server repo)
 - No TypeScript — plain JS throughout
 
 ## Project structure
 ```
-index.js              — mounts routes, starts schedulers
+index.js              — mounts routes, starts schedulers, initializes Sentry
 api.js                — all API routes (/api/*)
 auth.js               — Microsoft OAuth callback (/auth/microsoft/callback)
 email.js              — Graph API send, token management, renderEmailTemplate
 email-scheduler.js    — 4-touch follow-up, reply detection via Outlook inbox poll
+email-worker.js       — BullMQ worker that processes email jobs from the queue
+queues.js             — BullMQ queue definitions (emailQueue, etc.)
+bull-board.js         — Bull Board admin dashboard setup (/admin/queues)
 reoon.js              — bulk email verification submit/poll/update
 scheduler.js          — SMS scheduler (cron, per-client Eastern time windows)
 sms.js                — Twilio send helpers
@@ -39,6 +44,9 @@ MS_TENANT_ID=742b7e37-645a-4307-bb22-525f452389a3
 MS_CLIENT_SECRET
 MS_REDIRECT_URI=https://taraform-server-production.up.railway.app/auth/microsoft/callback
 REOON_API_KEY
+REDIS_URL
+BULL_BOARD_PASSWORD
+SENTRY_DSN
 ```
 
 ## API routes
@@ -54,6 +62,7 @@ Key routes:
 - GET  /api/email/verify-status             — poll job progress
 - POST /api/email/verify-reprocess          — re-apply results from existing task
 - DELETE /api/email/verify-reset            — clear stuck job state
+- GET  /admin/queues                        — Bull Board dashboard (password protected)
 
 ## Schedulers
 Both schedulers run via node-cron and check Eastern time (America/New_York) — NOT server local time.
@@ -61,7 +70,7 @@ Both schedulers run via node-cron and check Eastern time (America/New_York) — 
 **SMS scheduler (scheduler.js):** runs every 10 min, sends within per-client configured windows.
 **Email scheduler (email-scheduler.js):** runs every 15 min, 8:30AM-5:30PM Eastern, Mon-Fri.
   Flow: 1) check Outlook inbox for replies → cancel follow-ups
-        2) send due follow-ups from email_followup_queue
+        2) enqueue due follow-ups from email_followup_queue → BullMQ processes them via email-worker.js
         3) send Touch 1 to new verified contacts up to daily limit
 
 ## Email verification (Reoon)
@@ -81,6 +90,7 @@ renderEmailTemplate() variables:
 Supabase. Uses snake_case column names.
 Job state (Reoon, etc.) stored in sms_settings table as key/value JSON.
 Offers stored as JSONB array on property_crm_contacts.offers — known limitation, plan to migrate to own table.
+email_followup_queue status values: queued | pending | sent | failed
 
 ## Code style
 - No TypeScript — plain JS
@@ -90,8 +100,7 @@ Offers stored as JSONB array on property_crm_contacts.offers — known limitatio
 - module.exports = router must be at the END of api.js (after all routes)
 
 ## Known architectural limitations (future work)
-- Cron jobs should be replaced with BullMQ + Redis for reliability and retries
+- SMS cron jobs should be migrated to BullMQ + Redis (email queue already uses BullMQ)
 - Offers should be their own table, not JSONB
-- Need proper error monitoring (Sentry)
 - Need rate limiting per client
 - Business hours check relies on toLocaleString timezone conversion — works but fragile
