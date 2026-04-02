@@ -228,8 +228,6 @@ async function runEmailJob(clientId, clientName) {
   const touch1Combined = touch1.subject + ' ' + touch1.body;
 
   for (const contact of newContacts) {
-    if (enqueued >= remaining + enqueued) break; // reached the original remaining cap
-
     if (!hasRequiredFields(touch1Combined, contact)) {
       console.log(`[${clientName}] Skipping ${contact.first_name} ${contact.last_name} — missing fields`);
       continue;
