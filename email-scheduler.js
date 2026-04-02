@@ -1,4 +1,5 @@
 const cron     = require('node-cron');
+const Sentry   = require('@sentry/node');
 const supabase = require('./supabase');
 const { renderEmailTemplate, getTokenRecord, getValidAccessToken } = require('./email');
 const { emailQueue } = require('./queues');
@@ -270,7 +271,10 @@ async function runAllEmailJobs() {
 }
 
 cron.schedule('*/15 * * * *', () => {
-  runAllEmailJobs().catch(err => console.error('Email scheduler error:', err));
+  runAllEmailJobs().catch(err => {
+    console.error('Email scheduler error:', err);
+    Sentry.captureException(err);
+  });
 });
 
 console.log('Email scheduler — discovery every 15 min, sending via BullMQ worker');

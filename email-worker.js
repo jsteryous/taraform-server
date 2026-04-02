@@ -1,4 +1,5 @@
 const { Worker, DelayedError } = require('bullmq');
+const Sentry   = require('@sentry/node');
 const { connection } = require('./queues');
 const { sendEmail } = require('./email');
 const supabase = require('./supabase');
@@ -101,6 +102,17 @@ worker.on('completed', (job) => {
 
 worker.on('failed', (job, err) => {
   console.error(`[email-worker] Job ${job.id} failed (attempt ${job.attemptsMade}/${job.opts.attempts}): ${err.message}`);
+  if (job.attemptsMade >= job.opts.attempts) {
+    Sentry.withScope(scope => {
+      scope.setContext('job', {
+        id:          job.id,
+        contactId:   job.data.contactId,
+        touchNumber: job.data.touchNumber,
+        clientId:    job.data.clientId,
+      });
+      Sentry.captureException(err);
+    });
+  }
 });
 
 console.log('Email worker started — concurrency: 1, retries: 3 (exponential backoff)');

@@ -1,6 +1,14 @@
 require('dotenv').config();
+const Sentry  = require('@sentry/node');
 const express = require('express');
 const app = express();
+
+// ── Sentry ────────────────────────────────────────────────────
+if (process.env.SENTRY_DSN) {
+  Sentry.init({ dsn: process.env.SENTRY_DSN });
+} else {
+  console.warn('SENTRY_DSN not set — error reporting disabled');
+}
 
 // ── CORS ──────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -28,6 +36,9 @@ app.use('/admin/queues', bullBoardAuth, serverAdapter.getRouter());
 app.get('/', (req, res) => {
   res.json({ status: 'ok', app: 'Taraform SMS Engine', time: new Date().toISOString() });
 });
+
+// ── Express error handler (Sentry must be last middleware) ────
+app.use(Sentry.expressErrorHandler());
 
 // ── Start schedulers & workers ────────────────────────────────
 require('./scheduler');
