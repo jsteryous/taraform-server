@@ -4,11 +4,36 @@ const supabase = require('./supabase');
 const { sendSMS, renderTemplate } = require('./sms');
 const { scheduleFollowUps } = require('./followup');
 
+// ── Auth helper — extracts and verifies Supabase JWT ─────────
+async function getUserFromReq(req) {
+  const auth = req.headers['authorization'] || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token) return null;
+  const { data, error } = await supabase.auth.getUser(token);
+  if (error || !data?.user) return null;
+  return data.user;
+}
+
 // ── GET /api/clients ──────────────────────────────────────────
 router.get('/clients', async (req, res) => {
+  const user = await getUserFromReq(req);
+  if (!user) return res.json([]);
+
+  // Get client_ids this user belongs to
+  const { data: memberships, error: memErr } = await supabase
+    .from('client_users')
+    .select('client_id')
+    .eq('user_id', user.id);
+
+  if (memErr) return res.status(500).json({ error: memErr.message });
+  if (!memberships.length) return res.json([]);
+
+  const clientIds = memberships.map(m => m.client_id);
+
   const { data, error } = await supabase
     .from('clients')
     .select('*')
+    .in('id', clientIds)
     .order('name', { ascending: true });
 
   if (error) return res.status(500).json({ error: error.message });
@@ -34,6 +59,16 @@ router.post('/clients', async (req, res) => {
     key:       'automation_paused',
     value:     'false',
   });
+
+  // Add the creating user as owner if they're authenticated
+  const user = await getUserFromReq(req);
+  if (user) {
+    await supabase.from('client_users').insert({
+      client_id: data.id,
+      user_id:   user.id,
+      role:      'owner',
+    });
+  }
 
   res.json(data);
 });
@@ -765,6 +800,94 @@ router.get('/email/stats', async (req, res) => {
     autoEnabled:     autoSetting.data?.value === 'true',
     recent,
   });
+});
+
+// ── GET /api/clients/:id/users — list members ────────────────
+router.get('/clients/:id/users', async (req, res) => {
+  const user = await getUserFromReq(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  // Verify caller is a member of this client
+  const { data: membership, error: memErr } = await supabase
+    .from('client_users')
+    .select('role')
+    .eq('client_id', req.params.id)
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (memErr) return res.status(500).json({ error: memErr.message });
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const { data, error } = await supabase
+    .from('client_users')
+    .select('id, user_id, role, created_at')
+    .eq('client_id', req.params.id)
+    .order('created_at', { ascending: true });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ── POST /api/clients/:id/users — add a member by email ──────
+router.post('/clients/:id/users', async (req, res) => {
+  const user = await getUserFromReq(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  // Verify caller is a member of this client
+  const { data: membership, error: memErr } = await supabase
+    .from('client_users')
+    .select('role')
+    .eq('client_id', req.params.id)
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (memErr) return res.status(500).json({ error: memErr.message });
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'email is required' });
+
+  // Look up user by email via Supabase admin API
+  const { data: userList, error: lookupErr } = await supabase.auth.admin.listUsers();
+  if (lookupErr) return res.status(500).json({ error: lookupErr.message });
+
+  const target = userList.users.find(u => u.email === email);
+  if (!target) return res.status(404).json({ error: 'No user found with that email' });
+
+  const { data, error } = await supabase
+    .from('client_users')
+    .insert({ client_id: req.params.id, user_id: target.id, role: 'member' })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ── DELETE /api/clients/:id/users/:userId — remove a member ──
+router.delete('/clients/:id/users/:userId', async (req, res) => {
+  const user = await getUserFromReq(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  // Verify caller is an owner of this client
+  const { data: membership, error: memErr } = await supabase
+    .from('client_users')
+    .select('role')
+    .eq('client_id', req.params.id)
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (memErr) return res.status(500).json({ error: memErr.message });
+  if (!membership || membership.role !== 'owner') return res.status(403).json({ error: 'Forbidden — owner role required' });
+
+  const { error } = await supabase
+    .from('client_users')
+    .delete()
+    .eq('client_id', req.params.id)
+    .eq('user_id', req.params.userId);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
 });
 
 module.exports = router;
