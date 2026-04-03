@@ -239,7 +239,7 @@ router.get('/stats', async (req, res) => {
     supabase.from('sms_messages').select('direction, status, template_id, intent_category').eq('client_id', client_id),
     supabase.from('sms_followup_queue').select('status').eq('client_id', client_id).eq('status', 'pending'),
     supabase.from('sms_templates').select('id, name, touch_number').eq('client_id', client_id),
-    supabase.from('property_crm_contacts').select('id, first_name, last_name, county, tax_map_ids, offers').eq('client_id', client_id).not('offers', 'is', null).neq('offers', '[]'),
+    supabase.from('contact_offers').select('*, property_crm_contacts(first_name, last_name, county, tax_map_ids)').eq('client_id', client_id),
   ]);
 
   const smsStatusCounts = {}, contactStatusCounts = {};
@@ -268,10 +268,11 @@ router.get('/stats', async (req, res) => {
     return { id: t.id, name: t.name, touchNumber: t.touch_number, sent, replies, replyRate: sent > 0 ? Math.round((replies/sent)*100) : null, interested, optOuts, optOutRate: sent > 0 ? Math.round((optOuts/sent)*100) : null };
   }).sort((a, b) => (a.touchNumber || 99) - (b.touchNumber || 99));
 
-  // Offer stats — all contacts with offers
-  const allOffers = (contactsWithOffers.data || []).flatMap(c =>
-    (c.offers || []).map(o => ({ ...o, contactId: c.id, contactName: `${c.first_name||''} ${c.last_name||''}`.trim(), county: c.county||'', taxMapIds: c.tax_map_ids||[] }))
-  );
+  // Offer stats — all offers from contact_offers table
+  const allOffers = (contactsWithOffers.data || []).map(({ property_crm_contacts: pcc, ...o }) => {
+    const c = pcc || {};
+    return { ...o, contactId: o.contact_id, createdAt: o.created_at, contactName: `${c.first_name||''} ${c.last_name||''}`.trim(), county: c.county||'', taxMapIds: c.tax_map_ids||[] };
+  });
   const periodOffers = period === 'alltime' ? allOffers : allOffers.filter(o => o.createdAt && o.createdAt >= periodStart);
   const offerByStatus = {};
   periodOffers.forEach(o => { const s = o.status || 'Pending'; offerByStatus[s] = (offerByStatus[s]||0)+1; });
