@@ -303,6 +303,65 @@ router.get('/stats', async (req, res) => {
 
 
 
+// ── Offer CRUD ────────────────────────────────────────────────
+
+// POST /api/contacts/:contactId/offers
+router.post('/contacts/:contactId/offers', async (req, res) => {
+  const { contactId } = req.params;
+  const { amount, status, notes, clientId } = req.body;
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+
+  const { data, error } = await supabase
+    .from('contact_offers')
+    .insert({ id: Date.now(), contact_id: contactId, client_id: clientId, amount, status, notes })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// PUT /api/contacts/:contactId/offers/:offerId
+router.put('/contacts/:contactId/offers/:offerId', async (req, res) => {
+  const { contactId, offerId } = req.params;
+  const { amount, status, notes, clientId } = req.body;
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+
+  const { data, error } = await supabase
+    .from('contact_offers')
+    .update({ amount, status, notes })
+    .eq('id', offerId)
+    .eq('contact_id', contactId)
+    .eq('client_id', clientId)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Offer not found' });
+  res.json(data);
+});
+
+// DELETE /api/contacts/:contactId/offers/:offerId
+router.delete('/contacts/:contactId/offers/:offerId', async (req, res) => {
+  const { contactId, offerId } = req.params;
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id query param required' });
+
+  const { data, error } = await supabase
+    .from('contact_offers')
+    .delete()
+    .eq('id', offerId)
+    .eq('contact_id', contactId)
+    .eq('client_id', client_id)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Offer not found' });
+  res.json({ success: true });
+});
+
+
 // ── Email routes ──────────────────────────────────────────────
 const { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord } = require('./email');
 
