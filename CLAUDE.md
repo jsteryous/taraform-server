@@ -64,6 +64,13 @@ Key routes:
 - DELETE /api/email/verify-reset            — clear stuck job state
 - GET  /admin/queues                        — Bull Board dashboard (password protected)
 
+Multi-tenancy (client_users) routes — all require Authorization: Bearer <supabase_jwt>:
+- GET    /api/clients                       — returns only clients the caller belongs to ([] if no token)
+- POST   /api/clients                       — creates client + inserts owner row in client_users
+- GET    /api/clients/:id/users             — list members (caller must be a member)
+- POST   /api/clients/:id/users             — add user by email as 'member' (caller must be a member)
+- DELETE /api/clients/:id/users/:userId     — remove member (caller must be 'owner')
+
 ## Schedulers
 Both schedulers run via node-cron and check Eastern time (America/New_York) — NOT server local time.
 
@@ -86,11 +93,17 @@ renderEmailTemplate() variables:
 {{firstName}} {{lastName}} {{fullName}} {{county}} {{acreage}}
 {{propertyAddress}} {{propertyStreet}} {{ownerAddress}} {{ownerStreet}} {{taxMapId}}
 
+## Auth
+Routes that need the caller's identity extract the Supabase JWT via `getUserFromReq(req)` in api.js.
+This calls `supabase.auth.getUser(token)` using the service key client — no separate auth library needed.
+CORS allows `Authorization` header (index.js) so browser preflight passes.
+
 ## Database
 Supabase. Uses snake_case column names.
 Job state (Reoon, etc.) stored in sms_settings table as key/value JSON.
 Offers stored as JSONB array on property_crm_contacts.offers — known limitation, plan to migrate to own table.
 email_followup_queue status values: queued | pending | sent | failed
+client_users(id, client_id, user_id, role, created_at) — junction table for multi-tenancy; role: 'owner' | 'member'
 
 ## Code style
 - No TypeScript — plain JS
