@@ -416,16 +416,23 @@ router.delete('/contacts/:contactId/offers/:offerId', async (req, res) => {
 
 
 // ── Email routes ──────────────────────────────────────────────
-const { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord } = require('./email');
+const { sendEmail, renderEmailTemplate, getGmailAuthUrl, getAuthUrl, handleCallback, getTokenRecord } = require('./email');
 
-// GET /api/email/auth-url?client_id=xxx&provider=microsoft|google
+// GET /api/email/gmail-auth-url?client_id=  — generate Google OAuth URL
+router.get('/email/gmail-auth-url', (req, res) => {
+  const { client_id } = req.query;
+  if (!client_id) return res.status(400).json({ error: 'client_id required' });
+  res.json({ url: getGmailAuthUrl(client_id) });
+});
+
+// GET /api/email/auth-url?client_id=xxx&provider=outlook|gmail  — generic (kept for Outlook compat)
 router.get('/email/auth-url', (req, res) => {
-  const { client_id, provider = 'microsoft' } = req.query;
+  const { client_id, provider = 'outlook' } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id required' });
   res.json({ url: getAuthUrl(client_id, provider) });
 });
 
-// GET /api/email/status?client_id=xxx  — check if connected
+// GET /api/email/status?client_id=xxx  — { connected, email, provider: 'gmail'|'outlook'|null }
 router.get('/email/status', async (req, res) => {
   const { client_id } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id required' });

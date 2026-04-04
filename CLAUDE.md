@@ -59,8 +59,9 @@ Auth callbacks: `/auth/microsoft/callback` and `/auth/google/callback` (no /api 
 Key routes:
 - GET  /api/stats?client_id&period          — SMS + offer stats
 - GET  /api/email/stats?client_id&period    — email stats
-- GET  /api/email/auth-url?client_id&provider=microsoft|google — get OAuth URL
-- GET  /api/email/status?client_id          — { connected, email, provider }
+- GET  /api/email/gmail-auth-url?client_id  — get Google OAuth URL (uses googleapis)
+- GET  /api/email/auth-url?client_id&provider=outlook|gmail — generic OAuth URL
+- GET  /api/email/status?client_id          — { connected, email, provider: 'gmail'|'outlook'|null }
 - DELETE /api/email/disconnect?client_id    — remove connected account
 - POST /api/email/send-one                  — manual single send
 - POST /api/email/send-batch                — bulk manual send
@@ -113,12 +114,12 @@ Supabase. Uses snake_case column names.
 Job state (Reoon, etc.) stored in sms_settings table as key/value JSON.
 Offers stored as JSONB array on property_crm_contacts.offers — known limitation, plan to migrate to own table.
 email_followup_queue status values: queued | pending | sent | failed | skipped | cancelled
-email_tokens(client_id, access_token, refresh_token, expires_at, email, provider, updated_at) — provider: 'microsoft' | 'google'; one row per client
+email_tokens(client_id, access_token, refresh_token, expires_at, email, provider, updated_at) — provider: 'gmail' | 'outlook'; one row per client
 client_users(id, client_id, user_id, role, created_at) — junction table for multi-tenancy; role: 'owner' | 'member'
 
 ## Required DB migration (run once in Supabase)
 ```sql
-ALTER TABLE email_tokens ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'microsoft';
+ALTER TABLE email_tokens ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'outlook';
 ```
 
 ## Code style

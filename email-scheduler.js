@@ -1,8 +1,13 @@
-const cron     = require('node-cron');
-const Sentry   = require('@sentry/node');
-const supabase = require('./supabase');
+const { google }  = require('googleapis');
+const cron        = require('node-cron');
+const Sentry      = require('@sentry/node');
+const supabase    = require('./supabase');
 const { renderEmailTemplate, getTokenRecord, getValidAccessToken } = require('./email');
 const { emailQueue } = require('./queues');
+
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI || 'https://taraform-server-production.up.railway.app/auth/google/callback';
 
 const EMAIL_BUSINESS_START = 8.5;
 const EMAIL_BUSINESS_END   = 17.5;
@@ -103,26 +108,24 @@ async function getOutlookInboxSenders(accessToken) {
 
 async function getGmailInboxSenders(accessToken, contactEmails) {
   if (!contactEmails.length) return new Set();
-  // Search inbox for messages from any known contact — one API call
+
+  const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
+  oauth2Client.setCredentials({ access_token: accessToken });
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+  // One search query to find any inbox messages from known contacts
   const query = `from:(${contactEmails.join(' OR ')}) in:inbox`;
-  const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=200`,
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  if (!res.ok) return new Set();
-  const { messages } = await res.json();
-  if (!messages?.length) return new Set();
+  const listRes = await gmail.users.messages.list({ userId: 'me', q: query, maxResults: 200 });
+  const messages = listRes.data.messages || [];
+  if (!messages.length) return new Set();
 
   // Fetch From header for each matching message
   const senders = new Set();
   await Promise.all(messages.map(async ({ id }) => {
-    const msgRes = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (!msgRes.ok) return;
-    const msg = await msgRes.json();
-    const fromHeader = (msg.payload?.headers || []).find(h => h.name === 'From')?.value || '';
+    const msgRes = await gmail.users.messages.get({
+      userId: 'me', id, format: 'metadata', metadataHeaders: ['From'],
+    });
+    const fromHeader = (msgRes.data.payload?.headers || []).find(h => h.name === 'From')?.value || '';
     // Extract email address from "Name <email>" or plain "email"
     const match = fromHeader.match(/<([^>]+)>/) || fromHeader.match(/(\S+@\S+)/);
     if (match) senders.add(match[1].toLowerCase());
@@ -135,7 +138,7 @@ async function checkForReplies(clientId, clientName) {
     const tokenRecord = await getTokenRecord(clientId);
     if (!tokenRecord) return;
     const accessToken = await getValidAccessToken(clientId);
-    const provider    = tokenRecord.provider || 'microsoft';
+    const provider    = tokenRecord.provider || 'outlook';
 
     // Check both pending and queued rows — a queued job hasn't sent yet so we can still cancel
     const { data: active } = await supabase.from('email_followup_queue')
@@ -148,7 +151,7 @@ async function checkForReplies(clientId, clientName) {
     if (!contacts?.length) return;
 
     const contactEmails = contacts.map(c => c.email?.toLowerCase()).filter(Boolean);
-    const inboxEmails = provider === 'google'
+    const inboxEmails = provider === 'gmail'
       ? await getGmailInboxSenders(accessToken, contactEmails)
       : await getOutlookInboxSenders(accessToken);
 
