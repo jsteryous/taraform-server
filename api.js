@@ -75,17 +75,24 @@ router.post('/clients', async (req, res) => {
 
 // ── PUT /api/clients/:id — update client ──────────────────────
 router.put('/clients/:id', async (req, res) => {
-  const { name, twilio_number } = req.body;
+  const { name, twilio_number, config, custom_field_definitions } = req.body;
   const updates = {};
-  if (name          !== undefined) updates.name          = name;
-  if (twilio_number !== undefined) updates.twilio_number = twilio_number;
+  if (name                     !== undefined) updates.name                     = name;
+  if (twilio_number            !== undefined) updates.twilio_number            = twilio_number;
+  if (config                   !== undefined) updates.config                   = config;
+  if (custom_field_definitions !== undefined) updates.custom_field_definitions =
+    typeof custom_field_definitions === 'string'
+      ? custom_field_definitions
+      : JSON.stringify(custom_field_definitions);
+
+  if (Object.keys(updates).length === 0) {
+    const { data, error } = await supabase.from('clients').select('*').eq('id', req.params.id).single();
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
 
   const { data, error } = await supabase
-    .from('clients')
-    .update(updates)
-    .eq('id', req.params.id)
-    .select()
-    .single();
+    .from('clients').update(updates).eq('id', req.params.id).select().single();
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
@@ -234,10 +241,10 @@ router.get('/settings/:key', async (req, res) => {
     .select('value')
     .eq('key', req.params.key)
     .eq('client_id', client_id)
-    .single();
+    .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  res.json(data || { value: null });
 });
 
 // ── PUT /api/settings/:key ────────────────────────────────────
@@ -245,11 +252,22 @@ router.put('/settings/:key', async (req, res) => {
   const { value, client_id } = req.body;
   if (!client_id) return res.status(400).json({ error: 'client_id required in body' });
 
-  const { data, error } = await supabase
-    .from('sms_settings')
-    .upsert({ key: req.params.key, value, client_id })
-    .select()
-    .single();
+  const { data: existing } = await supabase
+    .from('sms_settings').select('id')
+    .eq('key', req.params.key).eq('client_id', client_id)
+    .maybeSingle();
+
+  let data, error;
+  if (existing) {
+    ({ data, error } = await supabase
+      .from('sms_settings').update({ value })
+      .eq('key', req.params.key).eq('client_id', client_id)
+      .select().single());
+  } else {
+    ({ data, error } = await supabase
+      .from('sms_settings').insert({ key: req.params.key, value, client_id })
+      .select().single());
+  }
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
