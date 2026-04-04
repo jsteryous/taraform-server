@@ -3,8 +3,12 @@ const supabase = require('./supabase');
 const MS_CLIENT_ID     = process.env.MS_CLIENT_ID;
 const MS_CLIENT_SECRET = process.env.MS_CLIENT_SECRET;
 const MS_TENANT_ID     = process.env.MS_TENANT_ID;
-const MS_REDIRECT_URI  = process.env.MS_REDIRECT_URI || 'https://taraform-server-production.up.railway.app/auth/microsoft/callback';
+const MS_REDIRECT_URI  = process.env.MS_REDIRECT_URI  || 'https://taraform-server-production.up.railway.app/auth/microsoft/callback';
 const GRAPH_BASE       = 'https://graph.microsoft.com/v1.0';
+
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI || 'https://taraform-server-production.up.railway.app/auth/google/callback';
 
 // ── Token management ──────────────────────────────────────────
 
@@ -13,11 +17,39 @@ async function getTokenRecord(clientId) {
     .from('email_tokens')
     .select('*')
     .eq('client_id', clientId)
-    .single();
+    .maybeSingle();
   return data;
 }
 
-async function refreshAccessToken(clientId, refreshToken) {
+async function refreshAccessToken(clientId, refreshToken, provider) {
+  if (provider === 'google') {
+    const params = new URLSearchParams({
+      client_id:     GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type:    'refresh_token',
+    });
+    const res  = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || 'Google token refresh failed');
+
+    await supabase.from('email_tokens').upsert({
+      client_id:     clientId,
+      access_token:  data.access_token,
+      refresh_token: data.refresh_token || refreshToken,
+      expires_at:    new Date(Date.now() + data.expires_in * 1000).toISOString(),
+      provider:      'google',
+      updated_at:    new Date().toISOString(),
+    }, { onConflict: 'client_id' });
+
+    return data.access_token;
+  }
+
+  // Microsoft
   const params = new URLSearchParams({
     client_id:     MS_CLIENT_ID,
     client_secret: MS_CLIENT_SECRET,
@@ -25,7 +57,6 @@ async function refreshAccessToken(clientId, refreshToken) {
     grant_type:    'refresh_token',
     scope:         'https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.ReadWrite offline_access',
   });
-
   const res  = await fetch(`https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -39,6 +70,7 @@ async function refreshAccessToken(clientId, refreshToken) {
     access_token:  data.access_token,
     refresh_token: data.refresh_token || refreshToken,
     expires_at:    new Date(Date.now() + data.expires_in * 1000).toISOString(),
+    provider:      'microsoft',
     updated_at:    new Date().toISOString(),
   }, { onConflict: 'client_id' });
 
@@ -50,7 +82,7 @@ async function getValidAccessToken(clientId) {
   if (!record) throw new Error('No email account connected for this client');
   const expiresAt = new Date(record.expires_at);
   if (expiresAt - Date.now() < 5 * 60 * 1000) {
-    return await refreshAccessToken(clientId, record.refresh_token);
+    return await refreshAccessToken(clientId, record.refresh_token, record.provider || 'microsoft');
   }
   return record.access_token;
 }
@@ -58,10 +90,9 @@ async function getValidAccessToken(clientId) {
 // ── Template rendering ────────────────────────────────────────
 
 function renderEmailTemplate(template, contact) {
-  // Extract street address from full property address
-  const propAddr = (contact.property_addresses || [])[0] || '';
+  const propAddr   = (contact.property_addresses || [])[0] || '';
   const propStreet = propAddr.split(',')[0].trim();
-  const ownerAddr = (contact.owner_address || '');
+  const ownerAddr  = (contact.owner_address || '');
   const ownerStreet = ownerAddr.split(',')[0].trim();
 
   const vars = {
@@ -85,11 +116,9 @@ function renderEmailTemplate(template, contact) {
   return out;
 }
 
-// ── Send one email ────────────────────────────────────────────
+// ── Send helpers ──────────────────────────────────────────────
 
-async function sendEmail({ clientId, contactId, to, subject, body, templateId }) {
-  const accessToken = await getValidAccessToken(clientId);
-
+async function sendViaGraph(accessToken, to, subject, body) {
   const res = await fetch(`${GRAPH_BASE}/me/sendMail`, {
     method: 'POST',
     headers: {
@@ -105,8 +134,52 @@ async function sendEmail({ clientId, contactId, to, subject, body, templateId })
       saveToSentItems: true,
     }),
   });
+  return res.status === 202;
+}
 
-  const success = res.status === 202;
+async function sendViaGmail(accessToken, to, subject, body) {
+  // Gmail API requires RFC 2822 MIME message, base64url-encoded
+  const raw = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: text/plain; charset=utf-8`,
+    '',
+    body,
+  ].join('\r\n');
+
+  const encoded = Buffer.from(raw)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw: encoded }),
+  });
+  return res.status === 200;
+}
+
+// ── Send one email ────────────────────────────────────────────
+
+async function sendEmail({ clientId, contactId, to, subject, body, templateId }) {
+  const record = await getTokenRecord(clientId);
+  if (!record) throw new Error('No email account connected for this client');
+
+  const provider = record.provider || 'microsoft';
+  const expiresAt = new Date(record.expires_at);
+  const accessToken = expiresAt - Date.now() < 5 * 60 * 1000
+    ? await refreshAccessToken(clientId, record.refresh_token, provider)
+    : record.access_token;
+
+  const success = provider === 'google'
+    ? await sendViaGmail(accessToken, to, subject, body)
+    : await sendViaGraph(accessToken, to, subject, body);
 
   await supabase.from('email_messages').insert({
     contact_id:  contactId,
@@ -131,7 +204,20 @@ async function sendEmail({ clientId, contactId, to, subject, body, templateId })
 
 // ── OAuth helpers ─────────────────────────────────────────────
 
-function getAuthUrl(clientId) {
+function getAuthUrl(clientId, provider = 'microsoft') {
+  if (provider === 'google') {
+    const params = new URLSearchParams({
+      client_id:     GOOGLE_CLIENT_ID,
+      response_type: 'code',
+      redirect_uri:  GOOGLE_REDIRECT_URI,
+      scope:         'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly openid email',
+      state:         clientId,
+      access_type:   'offline',
+      prompt:        'consent',  // required to receive a refresh_token every time
+    });
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+  }
+
   const params = new URLSearchParams({
     client_id:     MS_CLIENT_ID,
     response_type: 'code',
@@ -143,7 +229,43 @@ function getAuthUrl(clientId) {
   return `https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/authorize?${params}`;
 }
 
-async function handleCallback(code, clientId) {
+async function handleCallback(code, clientId, provider = 'microsoft') {
+  if (provider === 'google') {
+    const params = new URLSearchParams({
+      client_id:     GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      code,
+      redirect_uri:  GOOGLE_REDIRECT_URI,
+      grant_type:    'authorization_code',
+    });
+    const res  = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || 'Google auth failed');
+
+    let email = null;
+    try {
+      const payload = JSON.parse(Buffer.from(data.id_token.split('.')[1], 'base64').toString());
+      email = payload.email || null;
+    } catch {}
+
+    await supabase.from('email_tokens').upsert({
+      client_id:     clientId,
+      access_token:  data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at:    new Date(Date.now() + data.expires_in * 1000).toISOString(),
+      email,
+      provider:      'google',
+      updated_at:    new Date().toISOString(),
+    }, { onConflict: 'client_id' });
+
+    return email;
+  }
+
+  // Microsoft
   const params = new URLSearchParams({
     client_id:     MS_CLIENT_ID,
     client_secret: MS_CLIENT_SECRET,
@@ -151,7 +273,6 @@ async function handleCallback(code, clientId) {
     redirect_uri:  MS_REDIRECT_URI,
     grant_type:    'authorization_code',
   });
-
   const res  = await fetch(`https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -160,7 +281,6 @@ async function handleCallback(code, clientId) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error_description || 'Auth failed');
 
-  // Decode email from id_token
   let email = null;
   try {
     const payload = JSON.parse(Buffer.from(data.id_token.split('.')[1], 'base64').toString());
@@ -173,6 +293,7 @@ async function handleCallback(code, clientId) {
     refresh_token: data.refresh_token,
     expires_at:    new Date(Date.now() + data.expires_in * 1000).toISOString(),
     email,
+    provider:      'microsoft',
     updated_at:    new Date().toISOString(),
   }, { onConflict: 'client_id' });
 

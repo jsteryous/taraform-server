@@ -418,11 +418,11 @@ router.delete('/contacts/:contactId/offers/:offerId', async (req, res) => {
 // ── Email routes ──────────────────────────────────────────────
 const { sendEmail, renderEmailTemplate, getAuthUrl, handleCallback, getTokenRecord } = require('./email');
 
-// GET /api/email/auth-url?client_id=xxx  — get OAuth URL
+// GET /api/email/auth-url?client_id=xxx&provider=microsoft|google
 router.get('/email/auth-url', (req, res) => {
-  const { client_id } = req.query;
+  const { client_id, provider = 'microsoft' } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id required' });
-  res.json({ url: getAuthUrl(client_id) });
+  res.json({ url: getAuthUrl(client_id, provider) });
 });
 
 // GET /api/email/status?client_id=xxx  — check if connected
@@ -430,7 +430,7 @@ router.get('/email/status', async (req, res) => {
   const { client_id } = req.query;
   if (!client_id) return res.status(400).json({ error: 'client_id required' });
   const record = await getTokenRecord(client_id);
-  res.json({ connected: !!record, email: record?.email || null });
+  res.json({ connected: !!record, email: record?.email || null, provider: record?.provider || null });
 });
 
 // DELETE /api/email/disconnect?client_id=xxx

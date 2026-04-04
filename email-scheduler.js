@@ -42,7 +42,7 @@ function isEmailBusinessHours() {
 
 async function getEmailSetting(clientId, key) {
   const { data } = await supabase.from('sms_settings').select('value')
-    .eq('key', key).eq('client_id', clientId).single();
+    .eq('key', key).eq('client_id', clientId).maybeSingle();
   return data?.value ?? null;
 }
 
@@ -68,7 +68,7 @@ async function getEmailsCommittedToday(clientId) {
 async function getEmailTemplate(clientId, touchNumber) {
   const { data } = await supabase.from('email_templates')
     .select('id, name, subject, body')
-    .eq('client_id', clientId).eq('touch_number', touchNumber).limit(1).single();
+    .eq('client_id', clientId).eq('touch_number', touchNumber).limit(1).maybeSingle();
   return data || null;
 }
 
@@ -88,21 +88,54 @@ async function getContact(contactId) {
   return data;
 }
 
-// ── Poll Outlook inbox for replies ────────────────────────────
-async function checkForReplies(clientId, clientName) {
-  try {
-    const accessToken = await getValidAccessToken(clientId);
-    const res = await fetch(
-      `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=200&$select=from,receivedDateTime&$orderby=receivedDateTime desc`,
+// ── Poll inbox for replies (Outlook or Gmail) ─────────────────
+async function getOutlookInboxSenders(accessToken) {
+  const res = await fetch(
+    'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=200&$select=from,receivedDateTime&$orderby=receivedDateTime desc',
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) return new Set();
+  const { value: messages } = await res.json();
+  return new Set(
+    (messages || []).map(m => m.from?.emailAddress?.address?.toLowerCase()).filter(Boolean)
+  );
+}
+
+async function getGmailInboxSenders(accessToken, contactEmails) {
+  if (!contactEmails.length) return new Set();
+  // Search inbox for messages from any known contact — one API call
+  const query = `from:(${contactEmails.join(' OR ')}) in:inbox`;
+  const res = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=200`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!res.ok) return new Set();
+  const { messages } = await res.json();
+  if (!messages?.length) return new Set();
+
+  // Fetch From header for each matching message
+  const senders = new Set();
+  await Promise.all(messages.map(async ({ id }) => {
+    const msgRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
-    if (!res.ok) return;
-    const { value: messages } = await res.json();
-    if (!messages?.length) return;
+    if (!msgRes.ok) return;
+    const msg = await msgRes.json();
+    const fromHeader = (msg.payload?.headers || []).find(h => h.name === 'From')?.value || '';
+    // Extract email address from "Name <email>" or plain "email"
+    const match = fromHeader.match(/<([^>]+)>/) || fromHeader.match(/(\S+@\S+)/);
+    if (match) senders.add(match[1].toLowerCase());
+  }));
+  return senders;
+}
 
-    const inboxEmails = new Set(
-      messages.map(m => m.from?.emailAddress?.address?.toLowerCase()).filter(Boolean)
-    );
+async function checkForReplies(clientId, clientName) {
+  try {
+    const tokenRecord = await getTokenRecord(clientId);
+    if (!tokenRecord) return;
+    const accessToken = await getValidAccessToken(clientId);
+    const provider    = tokenRecord.provider || 'microsoft';
 
     // Check both pending and queued rows — a queued job hasn't sent yet so we can still cancel
     const { data: active } = await supabase.from('email_followup_queue')
@@ -112,8 +145,14 @@ async function checkForReplies(clientId, clientName) {
     const contactIds = [...new Set(active.map(p => p.contact_id))];
     const { data: contacts } = await supabase.from('property_crm_contacts')
       .select('id, email, first_name, last_name').in('id', contactIds);
+    if (!contacts?.length) return;
 
-    for (const contact of (contacts || [])) {
+    const contactEmails = contacts.map(c => c.email?.toLowerCase()).filter(Boolean);
+    const inboxEmails = provider === 'google'
+      ? await getGmailInboxSenders(accessToken, contactEmails)
+      : await getOutlookInboxSenders(accessToken);
+
+    for (const contact of contacts) {
       if (inboxEmails.has(contact.email?.toLowerCase())) {
         console.log(`[${clientName}] Reply from ${contact.first_name} ${contact.last_name} — cancelling follow-ups`);
         await supabase.from('email_followup_queue')
@@ -163,7 +202,7 @@ async function runEmailJob(clientId, clientName) {
   if (enabled !== 'true') return;
 
   const token = await getTokenRecord(clientId);
-  if (!token) { console.log(`[${clientName}] No Outlook token`); return; }
+  if (!token) { console.log(`[${clientName}] No email account connected`); return; }
 
   const dailyLimit = parseInt(await getEmailSetting(clientId, 'email_daily_limit') || '25', 10);
   const committed  = await getEmailsCommittedToday(clientId);

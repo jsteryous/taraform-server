@@ -47,7 +47,7 @@ async function queueNextTouch(contactId, clientId, currentTouch) {
     .eq('client_id', clientId)
     .eq('touch_number', nextTouch)
     .limit(1)
-    .single();
+    .maybeSingle();
   if (!template) return;
 
   const scheduledFor = new Date();

@@ -43,6 +43,9 @@ MS_CLIENT_ID=f50ae523-287e-49b4-b8a2-fbe84aab2e28
 MS_TENANT_ID=742b7e37-645a-4307-bb22-525f452389a3
 MS_CLIENT_SECRET
 MS_REDIRECT_URI=https://taraform-server-production.up.railway.app/auth/microsoft/callback
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+GOOGLE_REDIRECT_URI=https://taraform-server-production.up.railway.app/auth/google/callback
 REOON_API_KEY
 REDIS_URL
 BULL_BOARD_PASSWORD
@@ -51,11 +54,14 @@ SENTRY_DSN
 
 ## API routes
 All routes are under `/api/*` (mounted in index.js).
-Auth callback is at `/auth/microsoft/callback` (no /api prefix).
+Auth callbacks: `/auth/microsoft/callback` and `/auth/google/callback` (no /api prefix).
 
 Key routes:
 - GET  /api/stats?client_id&period          — SMS + offer stats
 - GET  /api/email/stats?client_id&period    — email stats
+- GET  /api/email/auth-url?client_id&provider=microsoft|google — get OAuth URL
+- GET  /api/email/status?client_id          — { connected, email, provider }
+- DELETE /api/email/disconnect?client_id    — remove connected account
 - POST /api/email/send-one                  — manual single send
 - POST /api/email/send-batch                — bulk manual send
 - POST /api/email/verify-start              — start Reoon verification job
@@ -106,8 +112,14 @@ CORS allows `Authorization` header (index.js) so browser preflight passes.
 Supabase. Uses snake_case column names.
 Job state (Reoon, etc.) stored in sms_settings table as key/value JSON.
 Offers stored as JSONB array on property_crm_contacts.offers — known limitation, plan to migrate to own table.
-email_followup_queue status values: queued | pending | sent | failed
+email_followup_queue status values: queued | pending | sent | failed | skipped | cancelled
+email_tokens(client_id, access_token, refresh_token, expires_at, email, provider, updated_at) — provider: 'microsoft' | 'google'; one row per client
 client_users(id, client_id, user_id, role, created_at) — junction table for multi-tenancy; role: 'owner' | 'member'
+
+## Required DB migration (run once in Supabase)
+```sql
+ALTER TABLE email_tokens ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'microsoft';
+```
 
 ## Code style
 - No TypeScript — plain JS
