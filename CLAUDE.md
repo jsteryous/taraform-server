@@ -1,13 +1,14 @@
 # Taraform Server
 
 ## What this is
-Express.js backend for Taraform CRM. Handles SMS (Twilio), email (Microsoft Graph API),
+Express.js backend for Taraform CRM. Handles SMS (Twilio), email (Microsoft Graph API or Gmail API),
 email verification (Reoon), and AI intent detection (Claude). Deployed on Railway.
 
 ## Stack
 - Node.js + Express
 - Supabase JS client (server-side)
 - BullMQ + Redis for email job queue
+- googleapis (Gmail API — send + inbox polling)
 - Sentry (@sentry/node) for error monitoring
 - Deployed on Railway (auto-deploys from main branch of taraform-server repo)
 - No TypeScript — plain JS throughout
@@ -16,9 +17,9 @@ email verification (Reoon), and AI intent detection (Claude). Deployed on Railwa
 ```
 index.js              — mounts routes, starts schedulers, initializes Sentry
 api.js                — all API routes (/api/*)
-auth.js               — Microsoft OAuth callback (/auth/microsoft/callback)
-email.js              — Graph API send, token management, renderEmailTemplate
-email-scheduler.js    — 4-touch follow-up, reply detection via Outlook inbox poll
+auth.js               — OAuth callbacks (/auth/microsoft/callback, /auth/google/callback)
+email.js              — send (Graph API or Gmail API), token management, OAuth helpers, renderEmailTemplate
+email-scheduler.js    — 4-touch follow-up, reply detection via Outlook or Gmail inbox poll
 email-worker.js       — BullMQ worker that processes email jobs from the queue
 queues.js             — BullMQ queue definitions (emailQueue, etc.)
 bull-board.js         — Bull Board admin dashboard setup (/admin/queues)
@@ -87,9 +88,10 @@ Both schedulers run via node-cron and check Eastern time (America/New_York) — 
 
 **SMS scheduler (scheduler.js):** runs every 10 min, sends within per-client configured windows.
 **Email scheduler (email-scheduler.js):** runs every 15 min, 8:30AM-5:30PM Eastern, Mon-Fri.
-  Flow: 1) check Outlook inbox for replies → cancel follow-ups
+  Flow: 1) check inbox for replies (Outlook via Graph API, Gmail via googleapis) → cancel follow-ups
         2) enqueue due follow-ups from email_followup_queue → BullMQ processes them via email-worker.js
         3) send Touch 1 to new verified contacts up to daily limit
+  Sending and reply detection branch on email_tokens.provider ('outlook' | 'gmail') per client.
 
 ## Email verification (Reoon)
 - Bulk API endpoint: POST /create-bulk-verification-task/
