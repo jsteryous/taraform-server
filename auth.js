@@ -40,7 +40,7 @@ router.get('/auth/google/callback', async (req, res) => {
   }
 
   try {
-    const email = await handleCallback(code, clientId, 'google');
+    const email = await handleCallback(code, clientId, 'gmail');
     res.send(`<html><body><script>
       window.opener?.postMessage({ type: 'GOOGLE_AUTH_SUCCESS', email: '${email || ''}' }, '*');
       window.close();
