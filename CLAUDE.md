@@ -64,6 +64,10 @@ Key routes:
 - DELETE /api/email/verify-reset            — clear stuck job state
 - GET  /admin/queues                        — Bull Board dashboard (password protected)
 
+Other client routes:
+- PUT    /api/clients/:id                   — update client (name, twilio_number, config, custom_field_definitions)
+- DELETE /api/clients/:id                   — delete client
+
 Multi-tenancy (client_users) routes — all require Authorization: Bearer <supabase_jwt>:
 - GET    /api/clients                       — returns only clients the caller belongs to ([] if no token)
 - POST   /api/clients                       — creates client + inserts owner row in client_users
@@ -109,6 +113,7 @@ client_users(id, client_id, user_id, role, created_at) — junction table for mu
 - No TypeScript — plain JS
 - Async/await throughout, no callbacks
 - Always check for Supabase errors before using .data
+- Use .maybeSingle() (not .single()) when a row may not exist — .single() throws a 406 error on no rows
 - Log meaningful messages for scheduler actions: [ClientName] Touch 1 → Contact Name
 - module.exports = router must be at the END of api.js (after all routes)
 
